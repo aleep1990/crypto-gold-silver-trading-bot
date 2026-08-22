@@ -18,6 +18,12 @@ from ta.trend import MACD
 from ta.volatility import AverageTrueRange
 import time
 
+# =============================================
+# ✅ ایمپورت صحیح کتابخانه تلگرام
+# =============================================
+from telegram import Bot
+from telegram.error import TelegramError
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -25,56 +31,53 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # =============================================
-# تنظیمات مدیریت ریسک بالا (هیجانی!)
+# تنظیمات مدیریت ریسک بالا
 # =============================================
 
 class RiskConfig:
-    MAX_POSITION_SIZE = 0.15    # ۱۵٪ سرمایه
-    STOP_LOSS = 0.03            # ۳٪ (برای کریپتو و کامودیتی)
-    TAKE_PROFIT = 0.06          # ۶٪ (نسبت ۱:۲)
-    MIN_CONFIDENCE = 35         # پایین برای سیگنال‌های بیشتر
+    MAX_POSITION_SIZE = 0.15
+    STOP_LOSS = 0.03
+    TAKE_PROFIT = 0.06
+    MIN_CONFIDENCE = 35
     NAME = "ترکیبی-هیجانی"
 
 # =============================================
 # دریافت داده از Pyth Network (طلا و نقره)
 # =============================================
 
+# توجه: این فیدها نمونه هستند و ممکن است تغییر کنند.
+# برای دریافت فیدهای دقیق، به مستندات Pyth مراجعه کنید.
+# در صورت خطا، از داده‌های جایگزین استفاده می‌شود.
+
 def get_pyth_price(feed_id):
-    """دریافت قیمت لحظه‌ای از Pyth Network (همون منبع پلی‌مارکت)"""
     try:
         url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
         headers = {"Accept": "application/json"}
         response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        if 'parsed' in data and len(data['parsed']) > 0:
-            price_data = data['parsed'][0]['price']
-            price = price_data['price'] * (10 ** -price_data['expo'])
-            return price
+        if response.status_code == 200:
+            data = response.json()
+            if 'parsed' in data and len(data['parsed']) > 0:
+                price_data = data['parsed'][0]['price']
+                price = price_data['price'] * (10 ** -price_data['expo'])
+                return price
+        logger.warning(f"⚠️ Pyth پاسخ ناموفق: {response.status_code}")
         return None
     except Exception as e:
         logger.error(f"خطا در دریافت از Pyth: {e}")
         return None
 
 def get_pyth_historical(symbol, days=30):
-    """دریافت داده‌های تاریخی از Pyth (با شبیه‌سازی برای ساخت دیتافریم)"""
-    # Pyth داده‌های تاریخی با تعداد محدود ارائه می‌دهد
-    # برای ساخت دیتافریم، قیمت فعلی را گرفته و با نوسان شبیه‌سازی می‌کنیم
     feed_ids = {
         'GOLD': '0x8b7c8e4c6e5b9a8c7d6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4',
         'SILVER': '0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8'
     }
-    
     current_price = get_pyth_price(feed_ids[symbol])
     if current_price is None:
         logger.warning(f"⚠️ قیمت {symbol} از Pyth دریافت نشد، از داده جایگزین استفاده می‌شود")
         return generate_fallback_data(symbol)
     
-    # ساخت داده‌های تاریخی با نوسان منطقی
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    
     prices = [current_price]
     vol = 0.015 if symbol == 'GOLD' else 0.025
     for i in range(1, days):
@@ -99,24 +102,23 @@ def get_pyth_historical(symbol, days=30):
 # =============================================
 
 def get_chainlink_price(symbol):
-    """دریافت قیمت لحظه‌ای از Chainlink (همون منبع پلی‌مارکت)"""
     feeds = {
         'BTC': 'btc-usd',
         'ETH': 'eth-usd'
     }
-    
     try:
         url = f"https://api.chain.link/data-feeds/{feeds[symbol]}/latest"
         response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        return data['price']
+        if response.status_code == 200:
+            data = response.json()
+            return data['price']
+        logger.warning(f"⚠️ Chainlink پاسخ ناموفق: {response.status_code}")
+        return None
     except Exception as e:
         logger.error(f"خطا در دریافت از Chainlink: {e}")
         return None
 
 def get_chainlink_historical(symbol, days=30):
-    """دریافت داده‌های تاریخی از Chainlink (با شبیه‌سازی)"""
     current_price = get_chainlink_price(symbol)
     if current_price is None:
         logger.warning(f"⚠️ قیمت {symbol} از Chainlink دریافت نشد، از داده جایگزین استفاده می‌شود")
@@ -124,7 +126,6 @@ def get_chainlink_historical(symbol, days=30):
     
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    
     prices = [current_price]
     vol = 0.025 if symbol == 'BTC' else 0.03
     for i in range(1, days):
@@ -149,7 +150,6 @@ def get_chainlink_historical(symbol, days=30):
 # =============================================
 
 def generate_fallback_data(symbol):
-    """تولید داده جایگزین با نوسان بالا"""
     now = datetime.now()
     days = 30
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
@@ -177,7 +177,6 @@ def generate_fallback_data(symbol):
     }, index=dates)
 
 def get_iran_gold():
-    """دریافت قیمت طلای ایران (برای اطلاعات تکمیلی)"""
     try:
         url = "https://www.tgju.org/profile/geram18"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -193,7 +192,7 @@ def get_iran_gold():
         return None
 
 # =============================================
-# کلاس معامله‌گر (نسخه ترکیبی)
+# کلاس معامله‌گر (بدون تغییر)
 # =============================================
 
 class CombinedTrader:
@@ -564,14 +563,15 @@ def format_status_report(metrics_all, iran_price):
     return report.strip()
 
 # =============================================
-# ارسال به تلگرام
+# ارسال به تلگرام (اصلاح شده)
 # =============================================
 
 async def send_telegram(text):
     if not TOKEN or not CHAT_ID:
+        logger.error("❌ TELEGRAM_TOKEN یا CHAT_ID تنظیم نشده!")
         return False
     try:
-        bot = Bot(token=TOKEN)
+        bot = Bot(token=TOKEN)   # ✅ حالا Bot به درستی تعریف شده
         me = await bot.get_me()
         logger.info(f"✅ ربات: @{me.username}")
         if len(text) > 4096:
@@ -580,6 +580,9 @@ async def send_telegram(text):
         else:
             await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
         return True
+    except TelegramError as e:
+        logger.error(f"خطای تلگرام: {e}")
+        return False
     except Exception as e:
         logger.error(f"خطا در ارسال: {e}")
         return False
