@@ -1,6 +1,6 @@
 """
 ربات ترکیبی لایو ترید با سیستم پشتیبان چندمنبعی و میانگین‌گیری
-منابع: Pyth, Chainlink, Yahoo Finance, goldprice.org, API Ninjas, Gold-API, CoinGecko
+منابع: Pyth (با API Key), Chainlink, Yahoo Finance, Goldprice.org, API Ninjas, Gold-API, CoinGecko
 """
 
 import os
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 NINJAS_API_KEY = os.getenv("NINJAS_API_KEY")
+PYTH_API_KEY = os.getenv("PYTH_API_KEY")  # ✅ جدید
 
 if not TOKEN or not CHAT_ID:
     logger.warning("⚠️ TELEGRAM_TOKEN یا CHAT_ID تنظیم نشده! پیام‌ها ارسال نمی‌شوند.")
@@ -50,18 +51,28 @@ class RiskConfig:
     SIGNAL_SCORE_WEIGHT = 1.5
 
 # =============================================
-# ۱. دریافت از PYTH NETWORK
+# ۱. دریافت از PYTH NETWORK (با API Key) ⭐
 # =============================================
 
 def get_pyth_price(feed_id):
+    """دریافت قیمت از Pyth با استفاده از API Key"""
+    if not PYTH_API_KEY:
+        logger.warning("⚠️ PYTH_API_KEY تنظیم نشده است")
+        return None
     try:
         url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
-        response = requests.get(url, timeout=8)
+        headers = {
+            "Authorization": f"Bearer {PYTH_API_KEY}",
+            "Accept": "application/json"
+        }
+        response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             data = response.json()
             if 'parsed' in data and len(data['parsed']) > 0:
                 price_data = data['parsed'][0]['price']
                 return price_data['price'] * (10 ** -price_data['expo'])
+        else:
+            logger.warning(f"⚠️ Pyth خطا: {response.status_code}")
         return None
     except Exception as e:
         logger.error(f"خطا در Pyth: {e}")
@@ -176,11 +187,10 @@ def get_ninjas_price(symbol):
         return None
 
 # =============================================
-# ۶. دریافت از GOLD-API (جدید ⭐)
+# ۶. دریافت از GOLD-API
 # =============================================
 
 def get_gold_api_price(symbol):
-    """دریافت قیمت طلا از Gold-API (رایگان، بدون کلید)"""
     if symbol != 'GOLD':
         return None
     try:
@@ -198,13 +208,11 @@ def get_gold_api_price(symbol):
         return None
 
 # =============================================
-# ۷. دریافت از COINGECKO (جدید ⭐)
+# ۷. دریافت از COINGECKO
 # =============================================
 
 def get_coingecko_price(symbol):
-    """دریافت قیمت ارز دیجیتال از CoinGecko (رایگان)"""
     try:
-        # نام‌ها در CoinGecko
         coin_ids = {
             'BTC': 'bitcoin',
             'ETH': 'ethereum'
@@ -226,7 +234,7 @@ def get_coingecko_price(symbol):
         return None
 
 # =============================================
-# ۸. سیستم پشتیبان چندمنبعی با میانگین‌گیری ⭐
+# ۸. سیستم پشتیبان چندمنبعی با میانگین‌گیری
 # =============================================
 
 def get_aggregated_price(symbol):
@@ -237,7 +245,7 @@ def get_aggregated_price(symbol):
         sources = ['pyth', 'yahoo', 'goldprice', 'ninjas', 'goldapi']
     elif symbol == 'SILVER':
         sources = ['pyth', 'yahoo', 'goldprice', 'ninjas']
-    else:  # BTC, ETH
+    else:
         sources = ['chainlink', 'yahoo', 'coingecko']
     
     logger.info(f"🔍 دریافت قیمت {symbol} از {len(sources)} منبع...")
@@ -342,14 +350,12 @@ def generate_historical_from_price(current_price, symbol, days=30):
     }, index=dates)
 
 # =============================================
-# ۱۰. داده‌های جایگزین (آخرین گزینه) - قیمت‌های به‌روز شده
+# ۱۰. داده‌های جایگزین (آخرین گزینه)
 # =============================================
 
 def generate_fallback_data(symbol, days=30):
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    
-    # ✅ قیمت‌های پایه به‌روز شده (نزدیک به قیمت‌های امروز)
     base_prices = {
         'GOLD': 4600,
         'SILVER': 55,
@@ -357,10 +363,8 @@ def generate_fallback_data(symbol, days=30):
         'ETH': 3500
     }
     vol_map = {'GOLD': 0.015, 'SILVER': 0.025, 'BTC': 0.025, 'ETH': 0.03}
-    
     base = base_prices.get(symbol, 100)
     vol = vol_map.get(symbol, 0.02)
-    
     prices = [base]
     for i in range(1, days):
         change = np.random.normal(0, vol)
@@ -370,7 +374,6 @@ def generate_fallback_data(symbol, days=30):
         if new_price > prices[-1] * 1.08:
             new_price = prices[-1] * 1.08
         prices.append(new_price)
-    
     logger.info(f"📊 داده‌های جایگزین برای {symbol} با قیمت پایه {base} ساخته شد")
     return pd.DataFrame({
         'Open': [p * (1 + np.random.normal(0, 0.003)) for p in prices],
@@ -748,7 +751,7 @@ def format_status_report(metrics_all, iran_price):
 
 📌 **سرمایه کل:** ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
 📌 **استراتژی حجم:** بر اساس قدرت سیگنال و نوسان (پویا)
-📌 **منابع داده:** Pyth/Chainlink + Yahoo + Goldprice.org + API Ninjas + Gold-API + CoinGecko (میانگین‌گیری)
+📌 **منابع داده:** Pyth (با API Key) + Chainlink + Yahoo + Goldprice.org + API Ninjas + Gold-API + CoinGecko
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -806,7 +809,7 @@ async def send_telegram(text):
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی (شامل Gold-API و CoinGecko)...")
+    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی (شامل Pyth با API Key)...")
     for f in ['state_gold.json', 'state_silver.json', 'state_btc.json', 'state_eth.json', 'state_combined.json']:
         if os.path.exists(f):
             os.remove(f)
