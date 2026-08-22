@@ -1,0 +1,47 @@
+name: Combined Trading Bot (Gold, Silver, BTC, ETH)
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'      # هر ۳۰ دقیقه یک بار
+  workflow_dispatch:            # امکان اجرای دستی
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Restore state cache
+      uses: actions/cache@v4
+      with:
+        path: state_combined.json
+        key: state-combined-${{ github.run_id }}
+        restore-keys: |
+          state-combined-
+    
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run Combined Trading Bot
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+      run: python bot_combined.py
+    
+    - name: Save state cache
+      uses: actions/cache@v4
+      with:
+        path: state_combined.json
+        key: state-combined-${{ github.run_id }}
