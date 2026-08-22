@@ -1,7 +1,6 @@
 """
-ربات ترکیبی لایو ترید (طلا، نقره، بیت‌کوین، اتریوم)
-سرمایه کل: ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
-منابع داده: Pyth → Chainlink → Yahoo Finance → Fallback
+ربات ترکیبی لایو ترید با سیستم پشتیبان چندمنبعی و میانگین‌گیری
+منابع: Pyth, Chainlink, Yahoo Finance, goldprice.org
 """
 
 import os
@@ -21,6 +20,7 @@ from telegram import Bot
 from telegram.error import TelegramError
 import yfinance as yf
 import time
+import re
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -42,13 +42,13 @@ class RiskConfig:
     SIGNAL_SCORE_WEIGHT = 1.5
 
 # =============================================
-# ۱. دریافت داده از PYTH (طلا و نقره)
+# ۱. دریافت از PYTH NETWORK
 # =============================================
 
 def get_pyth_price(feed_id):
     try:
         url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=8)
         if response.status_code == 200:
             data = response.json()
             if 'parsed' in data and len(data['parsed']) > 0:
@@ -58,103 +58,206 @@ def get_pyth_price(feed_id):
     except:
         return None
 
-def get_pyth_historical(symbol, days=30):
-    feed_ids = {
-        'GOLD': '0x8b7c8e4c6e5b9a8c7d6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4',
-        'SILVER': '0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8'
-    }
-    current_price = get_pyth_price(feed_ids[symbol])
-    if current_price is None:
-        logger.warning(f"⚠️ Pyth برای {symbol} در دسترس نیست")
-        return None
-    return generate_historical_from_price(current_price, symbol, days)
-
 # =============================================
-# ۲. دریافت داده از CHAINLINK (بیت‌کوین و اتریوم)
+# ۲. دریافت از CHAINLINK
 # =============================================
 
 def get_chainlink_price(symbol):
     feeds = {'BTC': 'btc-usd', 'ETH': 'eth-usd'}
     try:
         url = f"https://api.chain.link/data-feeds/{feeds[symbol]}/latest"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=8)
         if response.status_code == 200:
             return response.json()['price']
         return None
     except:
         return None
 
-def get_chainlink_historical(symbol, days=30):
-    current_price = get_chainlink_price(symbol)
-    if current_price is None:
-        logger.warning(f"⚠️ Chainlink برای {symbol} در دسترس نیست")
-        return None
-    return generate_historical_from_price(current_price, symbol, days)
-
 # =============================================
-# ۳. دریافت داده از YAHOO FINANCE (پشتیبان اصلی) ⭐ جدید
+# ۳. دریافت از YAHOO FINANCE
 # =============================================
 
-def get_yahoo_data(symbol, days=30):
-    """دریافت داده‌های تاریخی از Yahoo Finance"""
+def get_yahoo_price(symbol):
+    """دریافت قیمت لحظه‌ای از Yahoo Finance"""
     try:
-        # تبدیل نام نماد به فرمت یاهو
         yahoo_symbols = {
             'GOLD': 'GC=F',
             'SILVER': 'SI=F',
             'BTC': 'BTC-USD',
             'ETH': 'ETH-USD'
         }
-        
         ticker = yahoo_symbols.get(symbol)
         if not ticker:
-            logger.warning(f"⚠️ نماد {symbol} برای یاهو تعریف نشده")
             return None
-        
-        logger.info(f"📊 دریافت {symbol} از Yahoo Finance ({ticker})...")
-        
-        # دریافت داده با چند بار تلاش
-        for attempt in range(3):
-            try:
-                df = yf.download(ticker, period=f"{days+5}d", interval="1d", progress=False)
-                if df is not None and not df.empty and len(df) >= 10:
-                    # فقط آخرین days روز را نگه دار
-                    df = df.iloc[-days:]
-                    logger.info(f"✅ دریافت {len(df)} ردیف برای {symbol} از یاهو")
-                    return df
-            except Exception as e:
-                logger.warning(f"⚠️ تلاش {attempt+1} برای یاهو {symbol} ناموفق: {e}")
-                time.sleep(1)
-        
-        logger.warning(f"⚠️ Yahoo Finance برای {symbol} در دسترس نیست")
+        df = yf.download(ticker, period="1d", interval="1m", progress=False)
+        if df is not None and not df.empty:
+            return float(df['Close'].iloc[-1])
         return None
-    except Exception as e:
-        logger.error(f"❌ خطا در دریافت {symbol} از یاهو: {e}")
+    except:
+        return None
+
+def get_yahoo_historical(symbol, days=30):
+    """دریافت داده‌های تاریخی از Yahoo Finance"""
+    try:
+        yahoo_symbols = {
+            'GOLD': 'GC=F',
+            'SILVER': 'SI=F',
+            'BTC': 'BTC-USD',
+            'ETH': 'ETH-USD'
+        }
+        ticker = yahoo_symbols.get(symbol)
+        if not ticker:
+            return None
+        df = yf.download(ticker, period=f"{days+5}d", interval="1d", progress=False)
+        if df is not None and not df.empty and len(df) >= 10:
+            return df.iloc[-days:]
+        return None
+    except:
         return None
 
 # =============================================
-# ۴. ساخت داده‌های تاریخی از یک قیمت لحظه‌ای
+# ۴. دریافت از GOLDPRICE.ORG
+# =============================================
+
+def get_goldprice_org_price(symbol):
+    """دریافت قیمت لحظه‌ای طلا/نقره از goldprice.org"""
+    try:
+        url = "https://goldprice.org/live-gold-price.html"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        text = soup.get_text()
+        
+        if symbol == 'GOLD':
+            match = re.search(r'Spot Gold Price:\s*USD\s*([\d,]+\.?\d*)', text)
+            if match:
+                return float(match.group(1).replace(',', ''))
+        elif symbol == 'SILVER':
+            match = re.search(r'Spot Silver Price:\s*USD\s*([\d,]+\.?\d*)', text)
+            if match:
+                return float(match.group(1).replace(',', ''))
+        return None
+    except Exception as e:
+        logger.error(f"خطا در goldprice.org: {e}")
+        return None
+
+# =============================================
+# ۵. سیستم پشتیبان چندمنبعی با میانگین‌گیری ⭐
+# =============================================
+
+def get_aggregated_price(symbol):
+    """
+    دریافت قیمت از چندین منبع، مقایسه و محاسبه میانگین
+    بازگشت: (قیمت میانگین, دیکشنری قیمت‌های هر منبع, تعداد منابع موفق)
+    """
+    prices = {}
+    sources = []
+    
+    # تعیین منابع بر اساس نوع دارایی
+    if symbol in ['GOLD', 'SILVER']:
+        sources = ['pyth', 'yahoo', 'goldprice']
+    else:  # BTC, ETH
+        sources = ['chainlink', 'yahoo']
+    
+    logger.info(f"🔍 دریافت قیمت {symbol} از {len(sources)} منبع...")
+    
+    # دریافت از هر منبع
+    for source in sources:
+        try:
+            if source == 'pyth':
+                feed_ids = {
+                    'GOLD': '0x8b7c8e4c6e5b9a8c7d6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4',
+                    'SILVER': '0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8'
+                }
+                price = get_pyth_price(feed_ids[symbol])
+                if price:
+                    prices[source] = price
+                    logger.info(f"   ✅ Pyth: ${price:.2f}")
+            
+            elif source == 'chainlink':
+                price = get_chainlink_price(symbol)
+                if price:
+                    prices[source] = price
+                    logger.info(f"   ✅ Chainlink: ${price:.2f}")
+            
+            elif source == 'yahoo':
+                price = get_yahoo_price(symbol)
+                if price:
+                    prices[source] = price
+                    logger.info(f"   ✅ Yahoo: ${price:.2f}")
+            
+            elif source == 'goldprice':
+                price = get_goldprice_org_price(symbol)
+                if price:
+                    prices[source] = price
+                    logger.info(f"   ✅ Goldprice.org: ${price:.2f}")
+        
+        except Exception as e:
+            logger.warning(f"   ⚠️ خطا در {source}: {e}")
+    
+    # بررسی تعداد منابع موفق
+    if len(prices) == 0:
+        logger.warning(f"⚠️ هیچ منبعی برای {symbol} در دسترس نیست")
+        return None, {}, 0
+    
+    # محاسبه میانگین
+    price_values = list(prices.values())
+    avg_price = sum(price_values) / len(price_values)
+    
+    # محاسبه انحراف معیار برای تشخیص داده‌های نامعتبر
+    std_dev = np.std(price_values) if len(price_values) > 1 else 0
+    
+    # اگر انحراف زیاد باشد، هشدار می‌دهیم
+    if std_dev > avg_price * 0.03:  # اختلاف بیش از ۳٪
+        logger.warning(f"⚠️ اختلاف زیاد بین منابع {symbol}: {std_dev:.2f} (میانگین: {avg_price:.2f})")
+    
+    logger.info(f"✅ میانگین قیمت {symbol}: ${avg_price:.2f} (از {len(prices)} منبع)")
+    
+    return avg_price, prices, len(prices)
+
+def get_market_data_with_aggregation(symbol, days=30):
+    """
+    دریافت داده‌های تاریخی با استفاده از قیمت میانگین برای ساخت داده
+    اولویت اول: Yahoo Finance (داده‌های تاریخی واقعی)
+    در غیر این صورت: ساخت داده از قیمت میانگین
+    """
+    logger.info(f"📊 دریافت داده‌های تاریخی برای {symbol}...")
+    
+    # ابتدا سعی می‌کنیم داده‌های تاریخی واقعی از یاهو بگیریم
+    historical_df = get_yahoo_historical(symbol, days)
+    if historical_df is not None:
+        logger.info(f"✅ داده‌های تاریخی {symbol} از یاهو دریافت شد ({len(historical_df)} ردیف)")
+        return historical_df
+    
+    # اگر یاهو در دسترس نبود، از قیمت میانگین استفاده می‌کنیم
+    avg_price, prices, count = get_aggregated_price(symbol)
+    
+    if avg_price is None:
+        logger.warning(f"⚠️ هیچ قیمتی برای {symbol} دریافت نشد، از داده‌های جایگزین استفاده می‌شود")
+        return generate_fallback_data(symbol, days)
+    
+    # ساخت داده‌های تاریخی از قیمت میانگین
+    logger.info(f"🔄 ساخت داده‌های تاریخی {symbol} از میانگین قیمت {avg_price:.2f}")
+    return generate_historical_from_price(avg_price, symbol, days)
+
+# =============================================
+# ۶. ساخت داده‌های تاریخی از یک قیمت
 # =============================================
 
 def generate_historical_from_price(current_price, symbol, days=30):
-    """ساخت داده‌های تاریخی شبیه‌سازی‌شده از یک قیمت لحظه‌ای"""
+    """ساخت داده‌های تاریخی از یک قیمت لحظه‌ای"""
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
     
-    # تنظیم نوسان بر اساس دارایی
-    vol_map = {
-        'GOLD': 0.015,
-        'SILVER': 0.025,
-        'BTC': 0.025,
-        'ETH': 0.03
-    }
+    vol_map = {'GOLD': 0.015, 'SILVER': 0.025, 'BTC': 0.025, 'ETH': 0.03}
     vol = vol_map.get(symbol, 0.02)
     
     prices = [current_price]
     for i in range(1, days):
         change = np.random.normal(0, vol)
         new_price = prices[-1] * (1 + change)
-        # محدود کردن تغییرات
         if new_price < prices[-1] * 0.92:
             new_price = prices[-1] * 0.92
         if new_price > prices[-1] * 1.08:
@@ -170,28 +273,16 @@ def generate_historical_from_price(current_price, symbol, days=30):
     }, index=dates)
 
 # =============================================
-# ۵. داده‌های جایگزین (آخرین گزینه)
+# ۷. داده‌های جایگزین (آخرین گزینه)
 # =============================================
 
 def generate_fallback_data(symbol, days=30):
-    """تولید داده‌های جایگزین با قیمت‌های تقریبی واقعی"""
+    """تولید داده‌های جایگزین با قیمت‌های تقریبی واقعی (۲۰۲۶)"""
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
     
-    # قیمت‌های پایه‌ی تقریبی واقعی (۲۰۲۶)
-    base_prices = {
-        'GOLD': 4500,      # دلار در هر اونس
-        'SILVER': 55,      # دلار در هر اونس
-        'BTC': 65000,      # دلار
-        'ETH': 3500        # دلار
-    }
-    
-    vol_map = {
-        'GOLD': 0.015,
-        'SILVER': 0.025,
-        'BTC': 0.025,
-        'ETH': 0.03
-    }
+    base_prices = {'GOLD': 4500, 'SILVER': 55, 'BTC': 65000, 'ETH': 3500}
+    vol_map = {'GOLD': 0.015, 'SILVER': 0.025, 'BTC': 0.025, 'ETH': 0.03}
     
     base = base_prices.get(symbol, 100)
     vol = vol_map.get(symbol, 0.02)
@@ -216,40 +307,7 @@ def generate_fallback_data(symbol, days=30):
     }, index=dates)
 
 # =============================================
-# ۶. تابع اصلی دریافت داده با زنجیره‌ی پشتیبان
-# =============================================
-
-def get_market_data(symbol, days=30):
-    """
-    دریافت داده با اولویت:
-    1. Pyth (طلا/نقره) یا Chainlink (کریپتو)
-    2. Yahoo Finance (پشتیبان)
-    3. داده‌های جایگزین (آخرین گزینه)
-    """
-    logger.info(f"🔍 دریافت داده برای {symbol}...")
-    
-    # مرحله ۱: منابع اصلی
-    if symbol in ['GOLD', 'SILVER']:
-        df = get_pyth_historical(symbol, days)
-        if df is not None:
-            return df
-    else:  # BTC, ETH
-        df = get_chainlink_historical(symbol, days)
-        if df is not None:
-            return df
-    
-    # مرحله ۲: پشتیبان یاهو
-    logger.info(f"🔄 تلاش با Yahoo Finance برای {symbol}...")
-    df = get_yahoo_data(symbol, days)
-    if df is not None:
-        return df
-    
-    # مرحله ۳: داده‌های جایگزین
-    logger.info(f"🔄 استفاده از داده‌های جایگزین برای {symbol}")
-    return generate_fallback_data(symbol, days)
-
-# =============================================
-# ۷. قیمت طلای ایران
+# ۸. قیمت طلای ایران
 # =============================================
 
 def get_iran_gold():
@@ -268,7 +326,7 @@ def get_iran_gold():
         return None
 
 # =============================================
-# ۸. کلاس معامله‌گر (با فایل‌های حالت جداگانه)
+# ۹. کلاس معامله‌گر (بدون تغییر)
 # =============================================
 
 class CombinedTrader:
@@ -568,7 +626,7 @@ class CombinedTrader:
         }
 
 # =============================================
-# ۹. توابع تولید پیام‌های تلگرامی
+# ۱۰. توابع تولید پیام‌های تلگرامی
 # =============================================
 
 def format_entry_message(entry):
@@ -641,7 +699,7 @@ def format_status_report(metrics_all, iran_price):
 
 📌 **سرمایه کل:** ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
 📌 **استراتژی حجم:** بر اساس قدرت سیگنال و نوسان (پویا)
-📌 **منابع داده:** Pyth/Chainlink → Yahoo Finance → Fallback
+📌 **منابع داده:** Pyth/Chainlink + Yahoo + Goldprice.org (میانگین‌گیری)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -671,7 +729,7 @@ def format_status_report(metrics_all, iran_price):
     return report.strip()
 
 # =============================================
-# ۱۰. ارسال به تلگرام
+# ۱۱. ارسال به تلگرام
 # =============================================
 
 async def send_telegram(text):
@@ -696,11 +754,11 @@ async def send_telegram(text):
         return False
 
 # =============================================
-# ۱۱. تابع اصلی
+# ۱۲. تابع اصلی
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی با پشتیبان یاهو...")
+    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی...")
     
     # حذف فایل‌های حالت قدیمی
     for f in ['state_gold.json', 'state_silver.json', 'state_btc.json', 'state_eth.json', 'state_combined.json']:
@@ -712,11 +770,11 @@ async def main():
     if iran is None:
         iran = 210_000_000
     
-    # دریافت داده از زنجیره‌ی پشتیبان
-    gold_df = get_market_data('GOLD', days=30)
-    silver_df = get_market_data('SILVER', days=30)
-    btc_df = get_market_data('BTC', days=30)
-    eth_df = get_market_data('ETH', days=30)
+    # دریافت داده‌ها با سیستم میانگین‌گیری
+    gold_df = get_market_data_with_aggregation('GOLD', days=30)
+    silver_df = get_market_data_with_aggregation('SILVER', days=30)
+    btc_df = get_market_data_with_aggregation('BTC', days=30)
+    eth_df = get_market_data_with_aggregation('ETH', days=30)
     
     # ایجاد تریدرها
     trader_gold = CombinedTrader(capital=2500, symbol='GOLD')
