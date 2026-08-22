@@ -43,6 +43,7 @@ jobs:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
         NINJAS_API_KEY: ${{ secrets.NINJAS_API_KEY }}
+        PYTH_API_KEY: ${{ secrets.PYTH_API_KEY }}   # ✅ اضافه شده
       run: python bot_combined.py
     
     - name: Save state cache
