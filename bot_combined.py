@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 NINJAS_API_KEY = os.getenv("NINJAS_API_KEY")
-PYTH_API_KEY = os.getenv("PYTH_API_KEY")  # ✅ جدید
+PYTH_API_KEY = os.getenv("PYTH_API_KEY")
 
 if not TOKEN or not CHAT_ID:
     logger.warning("⚠️ TELEGRAM_TOKEN یا CHAT_ID تنظیم نشده! پیام‌ها ارسال نمی‌شوند.")
@@ -51,11 +51,10 @@ class RiskConfig:
     SIGNAL_SCORE_WEIGHT = 1.5
 
 # =============================================
-# ۱. دریافت از PYTH NETWORK (با API Key) ⭐
+# ۱. دریافت از PYTH NETWORK (با API Key)
 # =============================================
 
 def get_pyth_price(feed_id):
-    """دریافت قیمت از Pyth با استفاده از API Key"""
     if not PYTH_API_KEY:
         logger.warning("⚠️ PYTH_API_KEY تنظیم نشده است")
         return None
@@ -208,25 +207,19 @@ def get_gold_api_price(symbol):
         return None
 
 # =============================================
-# ۷. دریافت از COINGECKO
+# ۷. دریافت از COINGECKO (با قابلیت دریافت نقره) ⭐
 # =============================================
 
-def get_coingecko_price(symbol):
+def get_coingecko_price(coin_id):
+    """دریافت قیمت از CoinGecko با شناسه‌ی دقیق (bitcoin, ethereum, silver)"""
     try:
-        coin_ids = {
-            'BTC': 'bitcoin',
-            'ETH': 'ethereum'
-        }
-        coin_id = coin_ids.get(symbol)
-        if not coin_id:
-            return None
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             price = data.get(coin_id, {}).get('usd')
             if price:
-                logger.info(f"   ✅ CoinGecko ({symbol}): ${price:.2f}")
+                logger.info(f"   ✅ CoinGecko ({coin_id}): ${price:.2f}")
                 return float(price)
         return None
     except Exception as e:
@@ -234,7 +227,7 @@ def get_coingecko_price(symbol):
         return None
 
 # =============================================
-# ۸. سیستم پشتیبان چندمنبعی با میانگین‌گیری
+# ۸. سیستم پشتیبان چندمنبعی با میانگین‌گیری ⭐
 # =============================================
 
 def get_aggregated_price(symbol):
@@ -244,8 +237,8 @@ def get_aggregated_price(symbol):
     if symbol == 'GOLD':
         sources = ['pyth', 'yahoo', 'goldprice', 'ninjas', 'goldapi']
     elif symbol == 'SILVER':
-        sources = ['pyth', 'yahoo', 'goldprice', 'ninjas']
-    else:
+        sources = ['pyth', 'yahoo', 'goldprice', 'ninjas', 'coingecko']  # ✅ coingecko اضافه شد
+    else:  # BTC, ETH
         sources = ['chainlink', 'yahoo', 'coingecko']
     
     logger.info(f"🔍 دریافت قیمت {symbol} از {len(sources)} منبع...")
@@ -287,10 +280,18 @@ def get_aggregated_price(symbol):
                     prices[source] = price
                     logger.info(f"   ✅ Gold-API: ${price:.2f}")
             elif source == 'coingecko':
-                price = get_coingecko_price(symbol)
-                if price:
-                    prices[source] = price
-                    logger.info(f"   ✅ CoinGecko: ${price:.2f}")
+                # ✅ برای نقره، بیت‌کوین و اتریوم
+                coin_map = {
+                    'SILVER': 'silver',
+                    'BTC': 'bitcoin',
+                    'ETH': 'ethereum'
+                }
+                coin_id = coin_map.get(symbol)
+                if coin_id:
+                    price = get_coingecko_price(coin_id)
+                    if price:
+                        prices[source] = price
+                        logger.info(f"   ✅ CoinGecko: ${price:.2f}")
         except Exception as e:
             logger.warning(f"   ⚠️ خطا در {source}: {e}")
     
@@ -404,7 +405,7 @@ def get_iran_gold():
         return None
 
 # =============================================
-# ۱۲. کلاس معامله‌گر (بدون تغییر)
+# ۱۲. کلاس معامله‌گر
 # =============================================
 
 class CombinedTrader:
@@ -809,7 +810,7 @@ async def send_telegram(text):
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی (شامل Pyth با API Key)...")
+    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی (شامل Pyth با API Key و CoinGecko برای نقره)...")
     for f in ['state_gold.json', 'state_silver.json', 'state_btc.json', 'state_eth.json', 'state_combined.json']:
         if os.path.exists(f):
             os.remove(f)
