@@ -1,6 +1,6 @@
 """
 ربات ترکیبی لایو ترید با سیستم پشتیبان چندمنبعی و میانگین‌گیری
-منابع: Pyth (با API Key), Chainlink, Yahoo Finance, Goldprice.org, API Ninjas, Gold-API, CoinGecko
+منابع: Pyth, Chainlink, Yahoo, Goldprice.org, Ninjas, Gold-API, CoinGecko, Metals-API
 """
 
 import os
@@ -21,10 +21,6 @@ from telegram.error import TelegramError
 import yfinance as yf
 import time
 import re
-
-# =============================================
-# تنظیمات اولیه
-# =============================================
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -60,10 +56,7 @@ def get_pyth_price(feed_id):
         return None
     try:
         url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
-        headers = {
-            "Authorization": f"Bearer {PYTH_API_KEY}",
-            "Accept": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {PYTH_API_KEY}", "Accept": "application/json"}
         response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             data = response.json()
@@ -99,12 +92,7 @@ def get_chainlink_price(symbol):
 
 def get_yahoo_price(symbol):
     try:
-        yahoo_symbols = {
-            'GOLD': 'GC=F',
-            'SILVER': 'SI=F',
-            'BTC': 'BTC-USD',
-            'ETH': 'ETH-USD'
-        }
+        yahoo_symbols = {'GOLD': 'GC=F', 'SILVER': 'SI=F', 'BTC': 'BTC-USD', 'ETH': 'ETH-USD'}
         ticker = yahoo_symbols.get(symbol)
         if not ticker:
             return None
@@ -118,12 +106,7 @@ def get_yahoo_price(symbol):
 
 def get_yahoo_historical(symbol, days=30):
     try:
-        yahoo_symbols = {
-            'GOLD': 'GC=F',
-            'SILVER': 'SI=F',
-            'BTC': 'BTC-USD',
-            'ETH': 'ETH-USD'
-        }
+        yahoo_symbols = {'GOLD': 'GC=F', 'SILVER': 'SI=F', 'BTC': 'BTC-USD', 'ETH': 'ETH-USD'}
         ticker = yahoo_symbols.get(symbol)
         if not ticker:
             return None
@@ -186,20 +169,24 @@ def get_ninjas_price(symbol):
         return None
 
 # =============================================
-# ۶. دریافت از GOLD-API
+# ۶. دریافت از GOLD-API (برای طلا و نقره) ⭐
 # =============================================
 
 def get_gold_api_price(symbol):
-    if symbol != 'GOLD':
-        return None
+    """دریافت قیمت طلا یا نقره از Gold-API"""
     try:
-        url = "https://api.gold-api.com/price/XAU"
+        # Gold-API برای طلا: XAU، برای نقره: XAG
+        metal_map = {'GOLD': 'XAU', 'SILVER': 'XAG'}
+        metal = metal_map.get(symbol)
+        if not metal:
+            return None
+        url = f"https://api.gold-api.com/price/{metal}"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             price = data.get('price')
-            if price:
-                logger.info(f"   ✅ Gold-API: ${price:.2f}")
+            if price and float(price) > 0:
+                logger.info(f"   ✅ Gold-API ({metal}): ${price:.2f}")
                 return float(price)
         return None
     except Exception as e:
@@ -207,18 +194,17 @@ def get_gold_api_price(symbol):
         return None
 
 # =============================================
-# ۷. دریافت از COINGECKO (با قابلیت دریافت نقره) ⭐
+# ۷. دریافت از COINGECKO (با شناسه‌ی صحیح)
 # =============================================
 
 def get_coingecko_price(coin_id):
-    """دریافت قیمت از CoinGecko با شناسه‌ی دقیق (bitcoin, ethereum, silver)"""
     try:
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             price = data.get(coin_id, {}).get('usd')
-            if price:
+            if price and float(price) > 0:
                 logger.info(f"   ✅ CoinGecko ({coin_id}): ${price:.2f}")
                 return float(price)
         return None
@@ -227,7 +213,29 @@ def get_coingecko_price(coin_id):
         return None
 
 # =============================================
-# ۸. سیستم پشتیبان چندمنبعی با میانگین‌گیری ⭐
+# ۸. دریافت از METALS-API (برای نقره) ⭐ جدید
+# =============================================
+
+def get_metals_api_price(symbol):
+    """دریافت قیمت نقره از Metals-API (رایگان)"""
+    if symbol != 'SILVER':
+        return None
+    try:
+        url = "https://api.metals.live/v1/spot/silver"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            price = data.get('price')
+            if price and float(price) > 0:
+                logger.info(f"   ✅ Metals-API: ${price:.2f}")
+                return float(price)
+        return None
+    except Exception as e:
+        logger.error(f"خطا در Metals-API: {e}")
+        return None
+
+# =============================================
+# ۹. سیستم پشتیبان چندمنبعی با میانگین‌گیری ⭐
 # =============================================
 
 def get_aggregated_price(symbol):
@@ -237,7 +245,7 @@ def get_aggregated_price(symbol):
     if symbol == 'GOLD':
         sources = ['pyth', 'yahoo', 'goldprice', 'ninjas', 'goldapi']
     elif symbol == 'SILVER':
-        sources = ['pyth', 'yahoo', 'goldprice', 'ninjas', 'coingecko']  # ✅ coingecko اضافه شد
+        sources = ['pyth', 'yahoo', 'goldprice', 'ninjas', 'goldapi', 'metals']
     else:  # BTC, ETH
         sources = ['chainlink', 'yahoo', 'coingecko']
     
@@ -280,9 +288,7 @@ def get_aggregated_price(symbol):
                     prices[source] = price
                     logger.info(f"   ✅ Gold-API: ${price:.2f}")
             elif source == 'coingecko':
-                # ✅ برای نقره، بیت‌کوین و اتریوم
                 coin_map = {
-                    'SILVER': 'silver',
                     'BTC': 'bitcoin',
                     'ETH': 'ethereum'
                 }
@@ -292,6 +298,11 @@ def get_aggregated_price(symbol):
                     if price:
                         prices[source] = price
                         logger.info(f"   ✅ CoinGecko: ${price:.2f}")
+            elif source == 'metals':
+                price = get_metals_api_price(symbol)
+                if price:
+                    prices[source] = price
+                    logger.info(f"   ✅ Metals-API: ${price:.2f}")
         except Exception as e:
             logger.warning(f"   ⚠️ خطا در {source}: {e}")
     
@@ -317,15 +328,15 @@ def get_market_data_with_aggregation(symbol, days=30):
         return historical_df
     
     avg_price, prices, count = get_aggregated_price(symbol)
-    if avg_price is None:
-        logger.warning(f"⚠️ هیچ قیمتی برای {symbol} دریافت نشد، از داده‌های جایگزین استفاده می‌شود")
+    if avg_price is None or avg_price == 0:
+        logger.warning(f"⚠️ قیمت {symbol} معتبر نیست، از داده‌های جایگزین استفاده می‌شود")
         return generate_fallback_data(symbol, days)
     
     logger.info(f"🔄 ساخت داده‌های تاریخی {symbol} از میانگین قیمت {avg_price:.2f}")
     return generate_historical_from_price(avg_price, symbol, days)
 
 # =============================================
-# ۹. ساخت داده‌های تاریخی از یک قیمت
+# ۱۰. ساخت داده‌های تاریخی از یک قیمت
 # =============================================
 
 def generate_historical_from_price(current_price, symbol, days=30):
@@ -351,7 +362,7 @@ def generate_historical_from_price(current_price, symbol, days=30):
     }, index=dates)
 
 # =============================================
-# ۱۰. داده‌های جایگزین (آخرین گزینه)
+# ۱۱. داده‌های جایگزین (آخرین گزینه)
 # =============================================
 
 def generate_fallback_data(symbol, days=30):
@@ -385,7 +396,7 @@ def generate_fallback_data(symbol, days=30):
     }, index=dates)
 
 # =============================================
-# ۱۱. قیمت طلای ایران
+# ۱۲. قیمت طلای ایران
 # =============================================
 
 def get_iran_gold():
@@ -405,7 +416,7 @@ def get_iran_gold():
         return None
 
 # =============================================
-# ۱۲. کلاس معامله‌گر
+# ۱۳. کلاس معامله‌گر (بدون تغییر)
 # =============================================
 
 class CombinedTrader:
@@ -683,7 +694,7 @@ class CombinedTrader:
         }
 
 # =============================================
-# ۱۳. توابع تولید پیام‌های تلگرامی
+# ۱۴. توابع تولید پیام‌های تلگرامی
 # =============================================
 
 def format_entry_message(entry):
@@ -752,7 +763,7 @@ def format_status_report(metrics_all, iran_price):
 
 📌 **سرمایه کل:** ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
 📌 **استراتژی حجم:** بر اساس قدرت سیگنال و نوسان (پویا)
-📌 **منابع داده:** Pyth (با API Key) + Chainlink + Yahoo + Goldprice.org + API Ninjas + Gold-API + CoinGecko
+📌 **منابع داده:** Pyth + Chainlink + Yahoo + Goldprice.org + Ninjas + Gold-API + CoinGecko + Metals-API
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -781,7 +792,7 @@ def format_status_report(metrics_all, iran_price):
     return report.strip()
 
 # =============================================
-# ۱۴. ارسال به تلگرام
+# ۱۵. ارسال به تلگرام
 # =============================================
 
 async def send_telegram(text):
@@ -806,11 +817,11 @@ async def send_telegram(text):
         return False
 
 # =============================================
-# ۱۵. تابع اصلی
+# ۱۶. تابع اصلی
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی (شامل Pyth با API Key و CoinGecko برای نقره)...")
+    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی (شامل Gold-API و Metals-API برای نقره)...")
     for f in ['state_gold.json', 'state_silver.json', 'state_btc.json', 'state_eth.json', 'state_combined.json']:
         if os.path.exists(f):
             os.remove(f)
