@@ -1,8 +1,7 @@
 """
 ربات ترکیبی لایو ترید (طلا، نقره، بیت‌کوین، اتریوم)
 سرمایه کل: ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
-مدیریت حجم پویا بر اساس قدرت سیگنال و نوسان
-منبع داده: Pyth (طلا/نقره) + Chainlink (کریپتو) با Fallback
+منابع داده: Pyth → Chainlink → Yahoo Finance → Fallback
 """
 
 import os
@@ -20,10 +19,8 @@ from ta.trend import MACD
 from ta.volatility import AverageTrueRange
 from telegram import Bot
 from telegram.error import TelegramError
-
-# =============================================
-# تنظیمات اولیه
-# =============================================
+import yfinance as yf
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -31,28 +28,24 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-if not TOKEN or not CHAT_ID:
-    logger.warning("⚠️ TELEGRAM_TOKEN یا CHAT_ID تنظیم نشده! پیام‌ها ارسال نمی‌شوند.")
-
 # =============================================
-# تنظیمات مدیریت ریسک (پویا)
+# تنظیمات مدیریت ریسک
 # =============================================
 
 class RiskConfig:
-    MAX_POSITION_SIZE = 0.15          # حداکثر ۱۵٪ سرمایه در یک معامله
-    STOP_LOSS = 0.03                  # حد ضرر ۳٪
-    TAKE_PROFIT = 0.06                # حد سود ۶٪
-    MIN_CONFIDENCE = 35               # حداقل اطمینان برای ورود
-    BASE_RISK_PER_TRADE = 0.02        # ریسک پایه ۲٪ سرمایه
-    VOLATILITY_ADJUSTMENT = True      # فعال‌سازی تعدیل بر اساس نوسان
-    SIGNAL_SCORE_WEIGHT = 1.5         # وزن امتیاز سیگنال
+    MAX_POSITION_SIZE = 0.15
+    STOP_LOSS = 0.03
+    TAKE_PROFIT = 0.06
+    MIN_CONFIDENCE = 35
+    BASE_RISK_PER_TRADE = 0.02
+    VOLATILITY_ADJUSTMENT = True
+    SIGNAL_SCORE_WEIGHT = 1.5
 
 # =============================================
-# توابع دریافت داده از Pyth (طلا و نقره)
+# ۱. دریافت داده از PYTH (طلا و نقره)
 # =============================================
 
 def get_pyth_price(feed_id):
-    """دریافت قیمت لحظه‌ای از Pyth Network"""
     try:
         url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
         response = requests.get(url, timeout=10)
@@ -62,48 +55,25 @@ def get_pyth_price(feed_id):
                 price_data = data['parsed'][0]['price']
                 return price_data['price'] * (10 ** -price_data['expo'])
         return None
-    except Exception as e:
-        logger.error(f"خطا در دریافت از Pyth: {e}")
+    except:
         return None
 
 def get_pyth_historical(symbol, days=30):
-    """دریافت داده‌های تاریخی از Pyth (با شبیه‌سازی)"""
     feed_ids = {
         'GOLD': '0x8b7c8e4c6e5b9a8c7d6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4',
         'SILVER': '0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8'
     }
     current_price = get_pyth_price(feed_ids[symbol])
     if current_price is None:
-        logger.warning(f"⚠️ قیمت {symbol} از Pyth دریافت نشد، از داده جایگزین استفاده می‌شود")
-        return generate_fallback_data(symbol)
-    
-    now = datetime.now()
-    dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    prices = [current_price]
-    vol = 0.015 if symbol == 'GOLD' else 0.025
-    for i in range(1, days):
-        change = np.random.normal(0, vol)
-        new_price = prices[-1] * (1 + change)
-        if new_price < prices[-1] * 0.97:
-            new_price = prices[-1] * 0.97
-        if new_price > prices[-1] * 1.03:
-            new_price = prices[-1] * 1.03
-        prices.append(new_price)
-    
-    return pd.DataFrame({
-        'Open': [p * (1 + np.random.normal(0, 0.002)) for p in prices],
-        'High': [p * (1 + abs(np.random.normal(0, 0.005))) for p in prices],
-        'Low': [p * (1 - abs(np.random.normal(0, 0.005))) for p in prices],
-        'Close': prices,
-        'Volume': np.random.randint(1000, 5000, days)
-    }, index=dates)
+        logger.warning(f"⚠️ Pyth برای {symbol} در دسترس نیست")
+        return None
+    return generate_historical_from_price(current_price, symbol, days)
 
 # =============================================
-# توابع دریافت داده از Chainlink (بیت‌کوین و اتریوم)
+# ۲. دریافت داده از CHAINLINK (بیت‌کوین و اتریوم)
 # =============================================
 
 def get_chainlink_price(symbol):
-    """دریافت قیمت لحظه‌ای از Chainlink"""
     feeds = {'BTC': 'btc-usd', 'ETH': 'eth-usd'}
     try:
         url = f"https://api.chain.link/data-feeds/{feeds[symbol]}/latest"
@@ -111,61 +81,85 @@ def get_chainlink_price(symbol):
         if response.status_code == 200:
             return response.json()['price']
         return None
-    except Exception as e:
-        logger.error(f"خطا در دریافت از Chainlink: {e}")
+    except:
         return None
 
 def get_chainlink_historical(symbol, days=30):
-    """دریافت داده‌های تاریخی از Chainlink (با شبیه‌سازی)"""
     current_price = get_chainlink_price(symbol)
     if current_price is None:
-        logger.warning(f"⚠️ قیمت {symbol} از Chainlink دریافت نشد، از داده جایگزین استفاده می‌شود")
-        return generate_fallback_data(symbol)
-    
+        logger.warning(f"⚠️ Chainlink برای {symbol} در دسترس نیست")
+        return None
+    return generate_historical_from_price(current_price, symbol, days)
+
+# =============================================
+# ۳. دریافت داده از YAHOO FINANCE (پشتیبان اصلی) ⭐ جدید
+# =============================================
+
+def get_yahoo_data(symbol, days=30):
+    """دریافت داده‌های تاریخی از Yahoo Finance"""
+    try:
+        # تبدیل نام نماد به فرمت یاهو
+        yahoo_symbols = {
+            'GOLD': 'GC=F',
+            'SILVER': 'SI=F',
+            'BTC': 'BTC-USD',
+            'ETH': 'ETH-USD'
+        }
+        
+        ticker = yahoo_symbols.get(symbol)
+        if not ticker:
+            logger.warning(f"⚠️ نماد {symbol} برای یاهو تعریف نشده")
+            return None
+        
+        logger.info(f"📊 دریافت {symbol} از Yahoo Finance ({ticker})...")
+        
+        # دریافت داده با چند بار تلاش
+        for attempt in range(3):
+            try:
+                df = yf.download(ticker, period=f"{days+5}d", interval="1d", progress=False)
+                if df is not None and not df.empty and len(df) >= 10:
+                    # فقط آخرین days روز را نگه دار
+                    df = df.iloc[-days:]
+                    logger.info(f"✅ دریافت {len(df)} ردیف برای {symbol} از یاهو")
+                    return df
+            except Exception as e:
+                logger.warning(f"⚠️ تلاش {attempt+1} برای یاهو {symbol} ناموفق: {e}")
+                time.sleep(1)
+        
+        logger.warning(f"⚠️ Yahoo Finance برای {symbol} در دسترس نیست")
+        return None
+    except Exception as e:
+        logger.error(f"❌ خطا در دریافت {symbol} از یاهو: {e}")
+        return None
+
+# =============================================
+# ۴. ساخت داده‌های تاریخی از یک قیمت لحظه‌ای
+# =============================================
+
+def generate_historical_from_price(current_price, symbol, days=30):
+    """ساخت داده‌های تاریخی شبیه‌سازی‌شده از یک قیمت لحظه‌ای"""
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
+    
+    # تنظیم نوسان بر اساس دارایی
+    vol_map = {
+        'GOLD': 0.015,
+        'SILVER': 0.025,
+        'BTC': 0.025,
+        'ETH': 0.03
+    }
+    vol = vol_map.get(symbol, 0.02)
+    
     prices = [current_price]
-    vol = 0.025 if symbol == 'BTC' else 0.03
     for i in range(1, days):
         change = np.random.normal(0, vol)
         new_price = prices[-1] * (1 + change)
+        # محدود کردن تغییرات
         if new_price < prices[-1] * 0.92:
             new_price = prices[-1] * 0.92
         if new_price > prices[-1] * 1.08:
             new_price = prices[-1] * 1.08
         prices.append(new_price)
-    
-    return pd.DataFrame({
-        'Open': [p * (1 + np.random.normal(0, 0.003)) for p in prices],
-        'High': [p * (1 + abs(np.random.normal(0, 0.008))) for p in prices],
-        'Low': [p * (1 - abs(np.random.normal(0, 0.008))) for p in prices],
-        'Close': prices,
-        'Volume': np.random.randint(100, 1000, days)
-    }, index=dates)
-
-# =============================================
-# داده جایگزین (در صورت قطعی API)
-# =============================================
-
-def generate_fallback_data(symbol):
-    """تولید داده‌های شبیه‌سازی‌شده با نوسان واقعی"""
-    now = datetime.now()
-    days = 30
-    dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    
-    if 'GOLD' in symbol:
-        base, vol = 2500, 0.015
-    elif 'SILVER' in symbol:
-        base, vol = 30, 0.025
-    elif 'BTC' in symbol:
-        base, vol = 60000, 0.025
-    else:
-        base, vol = 3000, 0.03
-    
-    prices = [base]
-    for i in range(1, days):
-        change = np.random.normal(0, vol)
-        prices.append(prices[-1] * (1 + change))
     
     return pd.DataFrame({
         'Open': [p * (1 + np.random.normal(0, 0.003)) for p in prices],
@@ -175,8 +169,90 @@ def generate_fallback_data(symbol):
         'Volume': np.random.randint(1000, 5000, days)
     }, index=dates)
 
+# =============================================
+# ۵. داده‌های جایگزین (آخرین گزینه)
+# =============================================
+
+def generate_fallback_data(symbol, days=30):
+    """تولید داده‌های جایگزین با قیمت‌های تقریبی واقعی"""
+    now = datetime.now()
+    dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
+    
+    # قیمت‌های پایه‌ی تقریبی واقعی (۲۰۲۶)
+    base_prices = {
+        'GOLD': 4500,      # دلار در هر اونس
+        'SILVER': 55,      # دلار در هر اونس
+        'BTC': 65000,      # دلار
+        'ETH': 3500        # دلار
+    }
+    
+    vol_map = {
+        'GOLD': 0.015,
+        'SILVER': 0.025,
+        'BTC': 0.025,
+        'ETH': 0.03
+    }
+    
+    base = base_prices.get(symbol, 100)
+    vol = vol_map.get(symbol, 0.02)
+    
+    prices = [base]
+    for i in range(1, days):
+        change = np.random.normal(0, vol)
+        new_price = prices[-1] * (1 + change)
+        if new_price < prices[-1] * 0.92:
+            new_price = prices[-1] * 0.92
+        if new_price > prices[-1] * 1.08:
+            new_price = prices[-1] * 1.08
+        prices.append(new_price)
+    
+    logger.info(f"📊 داده‌های جایگزین برای {symbol} با قیمت پایه {base} ساخته شد")
+    return pd.DataFrame({
+        'Open': [p * (1 + np.random.normal(0, 0.003)) for p in prices],
+        'High': [p * (1 + abs(np.random.normal(0, 0.006))) for p in prices],
+        'Low': [p * (1 - abs(np.random.normal(0, 0.006))) for p in prices],
+        'Close': prices,
+        'Volume': np.random.randint(1000, 5000, days)
+    }, index=dates)
+
+# =============================================
+# ۶. تابع اصلی دریافت داده با زنجیره‌ی پشتیبان
+# =============================================
+
+def get_market_data(symbol, days=30):
+    """
+    دریافت داده با اولویت:
+    1. Pyth (طلا/نقره) یا Chainlink (کریپتو)
+    2. Yahoo Finance (پشتیبان)
+    3. داده‌های جایگزین (آخرین گزینه)
+    """
+    logger.info(f"🔍 دریافت داده برای {symbol}...")
+    
+    # مرحله ۱: منابع اصلی
+    if symbol in ['GOLD', 'SILVER']:
+        df = get_pyth_historical(symbol, days)
+        if df is not None:
+            return df
+    else:  # BTC, ETH
+        df = get_chainlink_historical(symbol, days)
+        if df is not None:
+            return df
+    
+    # مرحله ۲: پشتیبان یاهو
+    logger.info(f"🔄 تلاش با Yahoo Finance برای {symbol}...")
+    df = get_yahoo_data(symbol, days)
+    if df is not None:
+        return df
+    
+    # مرحله ۳: داده‌های جایگزین
+    logger.info(f"🔄 استفاده از داده‌های جایگزین برای {symbol}")
+    return generate_fallback_data(symbol, days)
+
+# =============================================
+# ۷. قیمت طلای ایران
+# =============================================
+
 def get_iran_gold():
-    """دریافت قیمت طلای ایران (اختیاری)"""
     try:
         url = "https://www.tgju.org/profile/geram18"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -192,11 +268,12 @@ def get_iran_gold():
         return None
 
 # =============================================
-# کلاس معامله‌گر با مدیریت سرمایه پویا
+# ۸. کلاس معامله‌گر (با فایل‌های حالت جداگانه)
 # =============================================
 
 class CombinedTrader:
-    def __init__(self, capital=2500):
+    def __init__(self, capital=2500, symbol='GENERAL'):
+        self.symbol = symbol
         self.initial = capital
         self.capital = capital
         self.trades = []
@@ -206,7 +283,7 @@ class CombinedTrader:
         self.max_drawdown = 0
         self.peak = capital
         self.config = RiskConfig()
-        self.state_file = "state_combined.json"
+        self.state_file = f"state_{symbol.lower()}.json"
         self.load_state()
     
     def load_state(self):
@@ -214,19 +291,22 @@ class CombinedTrader:
             try:
                 with open(self.state_file, 'r') as f:
                     data = json.load(f)
-                    self.capital = data.get('capital', self.initial)
-                    self.trades = data.get('trades', [])
-                    self.open_positions = data.get('open_positions', {})
-                    self.wins = data.get('wins', 0)
-                    self.losses = data.get('losses', 0)
-                    self.max_drawdown = data.get('max_drawdown', 0)
-                    self.peak = data.get('peak', self.initial)
-            except:
-                pass
+                    if data.get('symbol') == self.symbol:
+                        self.capital = data.get('capital', self.initial)
+                        self.trades = data.get('trades', [])
+                        self.open_positions = data.get('open_positions', {})
+                        self.wins = data.get('wins', 0)
+                        self.losses = data.get('losses', 0)
+                        self.max_drawdown = data.get('max_drawdown', 0)
+                        self.peak = data.get('peak', self.initial)
+                        logger.info(f"✅ وضعیت {self.symbol} بارگذاری شد (سرمایه: {self.capital:.2f})")
+            except Exception as e:
+                logger.warning(f"⚠️ خطا در بارگذاری {self.symbol}: {e}")
     
     def save_state(self):
         try:
             data = {
+                'symbol': self.symbol,
                 'capital': self.capital,
                 'trades': self.trades[-50:],
                 'open_positions': self.open_positions,
@@ -237,59 +317,40 @@ class CombinedTrader:
             }
             with open(self.state_file, 'w') as f:
                 json.dump(data, f, indent=2, default=str)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"⚠️ خطا در ذخیره {self.symbol}: {e}")
     
     def calculate_position_size(self, price, atr, signal_score, confidence):
-        """
-        محاسبه حجم معامله به‌صورت پویا بر اساس:
-        - امتیاز سیگنال (قدرت سیگنال)
-        - نوسان (ATR) برای تعدیل ریسک
-        - اعتماد به سیگنال
-        - سرمایه‌ی موجود
-        """
-        # ۱. ریسک پایه بر اساس سرمایه
         base_risk = self.capital * self.config.BASE_RISK_PER_TRADE
-        
-        # ۲. تعدیل بر اساس امتیاز سیگنال (هرچه امتیاز بیشتر، ریسک بیشتر)
         score_factor = min(max(signal_score / 2.0, 0.5), 2.0)
         adjusted_risk = base_risk * score_factor
-        
-        # ۳. تعدیل بر اساس اعتماد (Confidence)
         confidence_factor = confidence / 100.0
         adjusted_risk *= confidence_factor
         
-        # ۴. تعدیل بر اساس نوسان (ATR)
         if self.config.VOLATILITY_ADJUSTMENT:
             atr_percent = (atr / price) * 100
             if atr_percent > 3:
                 volatility_factor = 3.0 / atr_percent
                 adjusted_risk *= min(volatility_factor, 1.0)
         
-        # ۵. محدود کردن ریسک به حداکثر مجاز
         max_risk = self.capital * self.config.MAX_POSITION_SIZE * self.config.STOP_LOSS
         adjusted_risk = min(adjusted_risk, max_risk)
         
-        # ۶. محاسبه حجم (تعداد واحد) بر اساس فاصله حد ضرر
         stop_distance = max(self.config.STOP_LOSS * price, atr * 1.5)
         if stop_distance <= 0:
             return 0
         
         position_size = adjusted_risk / stop_distance
-        
-        # ۷. محدود کردن حجم به حداکثر مجاز
         max_position = (self.capital * self.config.MAX_POSITION_SIZE) / price
         position_size = min(position_size, max_position)
         
-        # ۸. حداقل حجم قابل قبول
         if position_size < 0.001:
             return 0
         
-        logger.info(f"📊 حجم معامله: {position_size:.4f} (ریسک: {adjusted_risk:.2f}, امتیاز: {signal_score:.1f})")
+        logger.info(f"📊 حجم: {position_size:.4f} (ریسک: {adjusted_risk:.2f}, امتیاز: {signal_score:.1f})")
         return position_size
     
     def get_signal_with_reason(self, df, idx):
-        """تولید سیگنال با تحلیل کامل و امتیاز"""
         if idx < 20:
             return None, 0, {}, 0
         
@@ -304,7 +365,6 @@ class CombinedTrader:
         reasons = {}
         score = 0
         
-        # RSI
         if rsi < 30:
             score += 1
             reasons['RSI'] = f"اشباع فروش ({rsi:.1f}) → خرید"
@@ -314,7 +374,6 @@ class CombinedTrader:
         else:
             reasons['RSI'] = f"خنثی ({rsi:.1f})"
         
-        # MACD
         if macd > 0:
             score += 0.5
             reasons['MACD'] = f"مثبت ({macd:.3f}) → صعودی"
@@ -322,7 +381,6 @@ class CombinedTrader:
             score -= 0.5
             reasons['MACD'] = f"منفی ({macd:.3f}) → نزولی"
         
-        # میانگین‌ها
         if price > sma20 and price > sma50:
             score += 0.5
             reasons['میانگین'] = "قیمت بالای SMA20 و SMA50 → صعودی"
@@ -332,7 +390,6 @@ class CombinedTrader:
         else:
             reasons['میانگین'] = "خنثی"
         
-        # ATR
         if 0.5 < atr_pct < 5:
             score += 0.5
             reasons['ATR'] = f"نوسان مناسب ({atr_pct:.1f}%)"
@@ -342,7 +399,6 @@ class CombinedTrader:
         else:
             reasons['ATR'] = f"نوسان کم ({atr_pct:.1f}%)"
         
-        # دایورجنس
         if idx > 20:
             price_prev = df['Close'].iloc[idx-5]
             rsi_prev = RSIIndicator(df['Close']).rsi().iloc[idx-5]
@@ -361,7 +417,6 @@ class CombinedTrader:
             return 'HOLD', 50, reasons, score
     
     def process(self, df, symbol):
-        """پردازش داده‌ها و بروزرسانی پوزیشن‌ها"""
         if df.empty or len(df) < 20:
             return None, None
         
@@ -372,7 +427,6 @@ class CombinedTrader:
         new_entries = []
         closed_trades = []
         
-        # بررسی پوزیشن‌های باز
         for sym in list(self.open_positions.keys()):
             pos = self.open_positions[sym]
             if pos['type'] == 'BUY':
@@ -394,7 +448,6 @@ class CombinedTrader:
                     if closed:
                         closed_trades.append(closed)
         
-        # ورود جدید با حجم پویا
         if symbol not in self.open_positions:
             signal, confidence, reasons, score = self.get_signal_with_reason(df, last_idx)
             if confidence >= self.config.MIN_CONFIDENCE and signal in ['BUY', 'SELL']:
@@ -515,7 +568,7 @@ class CombinedTrader:
         }
 
 # =============================================
-# توابع تولید پیام‌های تلگرامی
+# ۹. توابع تولید پیام‌های تلگرامی
 # =============================================
 
 def format_entry_message(entry):
@@ -588,6 +641,7 @@ def format_status_report(metrics_all, iran_price):
 
 📌 **سرمایه کل:** ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
 📌 **استراتژی حجم:** بر اساس قدرت سیگنال و نوسان (پویا)
+📌 **منابع داده:** Pyth/Chainlink → Yahoo Finance → Fallback
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -617,7 +671,7 @@ def format_status_report(metrics_all, iran_price):
     return report.strip()
 
 # =============================================
-# ارسال به تلگرام
+# ۱۰. ارسال به تلگرام
 # =============================================
 
 async def send_telegram(text):
@@ -642,43 +696,47 @@ async def send_telegram(text):
         return False
 
 # =============================================
-# تابع اصلی
+# ۱۱. تابع اصلی
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی با سرمایه ۱۰,۰۰۰ دلار و مدیریت پویا...")
+    logger.info("🚀 شروع ربات ترکیبی با پشتیبان یاهو...")
+    
+    # حذف فایل‌های حالت قدیمی
+    for f in ['state_gold.json', 'state_silver.json', 'state_btc.json', 'state_eth.json', 'state_combined.json']:
+        if os.path.exists(f):
+            os.remove(f)
+            logger.info(f"🗑️ فایل {f} حذف شد")
     
     iran = get_iran_gold()
     if iran is None:
         iran = 210_000_000
     
-    # دریافت داده از منابع مختلف
-    gold_df = get_pyth_historical('GOLD', days=30)
-    silver_df = get_pyth_historical('SILVER', days=30)
-    btc_df = get_chainlink_historical('BTC', days=30)
-    eth_df = get_chainlink_historical('ETH', days=30)
+    # دریافت داده از زنجیره‌ی پشتیبان
+    gold_df = get_market_data('GOLD', days=30)
+    silver_df = get_market_data('SILVER', days=30)
+    btc_df = get_market_data('BTC', days=30)
+    eth_df = get_market_data('ETH', days=30)
     
-    # ایجاد نمونه‌های معامله‌گر (هر کدام با ۲,۵۰۰ دلار)
-    trader_gold = CombinedTrader(capital=2500)
-    trader_silver = CombinedTrader(capital=2500)
-    trader_btc = CombinedTrader(capital=2500)
-    trader_eth = CombinedTrader(capital=2500)
+    # ایجاد تریدرها
+    trader_gold = CombinedTrader(capital=2500, symbol='GOLD')
+    trader_silver = CombinedTrader(capital=2500, symbol='SILVER')
+    trader_btc = CombinedTrader(capital=2500, symbol='BTC')
+    trader_eth = CombinedTrader(capital=2500, symbol='ETH')
     
-    # پردازش داده‌ها
+    # پردازش
     entries_gold, exits_gold = trader_gold.process(gold_df, 'GOLD')
     entries_silver, exits_silver = trader_silver.process(silver_df, 'SILVER')
     entries_btc, exits_btc = trader_btc.process(btc_df, 'BTC')
     entries_eth, exits_eth = trader_eth.process(eth_df, 'ETH')
     
-    # ارسال پیام‌های ورود
+    # ارسال پیام‌ها
     for entry in entries_gold + entries_silver + entries_btc + entries_eth:
         await send_telegram(format_entry_message(entry))
     
-    # ارسال پیام‌های خروج
     for trade in exits_gold + exits_silver + exits_btc + exits_eth:
         await send_telegram(format_exit_message(trade))
     
-    # گزارش وضعیت
     metrics_all = {
         'GOLD': trader_gold.get_metrics(),
         'SILVER': trader_silver.get_metrics(),
