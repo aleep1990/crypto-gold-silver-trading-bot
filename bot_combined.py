@@ -1,6 +1,6 @@
 """
 ربات ترکیبی لایو ترید با سیستم پشتیبان چندمنبعی و میانگین‌گیری
-منابع: Pyth, Chainlink, Yahoo Finance, goldprice.org
+منابع: Pyth, Chainlink, Yahoo Finance, goldprice.org, API Ninjas
 """
 
 import os
@@ -22,11 +22,19 @@ import yfinance as yf
 import time
 import re
 
+# =============================================
+# تنظیمات اولیه
+# =============================================
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+NINJAS_API_KEY = os.getenv("NINJAS_API_KEY")
+
+if not TOKEN or not CHAT_ID:
+    logger.warning("⚠️ TELEGRAM_TOKEN یا CHAT_ID تنظیم نشده! پیام‌ها ارسال نمی‌شوند.")
 
 # =============================================
 # تنظیمات مدیریت ریسک
@@ -55,7 +63,8 @@ def get_pyth_price(feed_id):
                 price_data = data['parsed'][0]['price']
                 return price_data['price'] * (10 ** -price_data['expo'])
         return None
-    except:
+    except Exception as e:
+        logger.error(f"خطا در Pyth: {e}")
         return None
 
 # =============================================
@@ -70,7 +79,8 @@ def get_chainlink_price(symbol):
         if response.status_code == 200:
             return response.json()['price']
         return None
-    except:
+    except Exception as e:
+        logger.error(f"خطا در Chainlink: {e}")
         return None
 
 # =============================================
@@ -78,7 +88,6 @@ def get_chainlink_price(symbol):
 # =============================================
 
 def get_yahoo_price(symbol):
-    """دریافت قیمت لحظه‌ای از Yahoo Finance"""
     try:
         yahoo_symbols = {
             'GOLD': 'GC=F',
@@ -93,11 +102,11 @@ def get_yahoo_price(symbol):
         if df is not None and not df.empty:
             return float(df['Close'].iloc[-1])
         return None
-    except:
+    except Exception as e:
+        logger.error(f"خطا در یاهو: {e}")
         return None
 
 def get_yahoo_historical(symbol, days=30):
-    """دریافت داده‌های تاریخی از Yahoo Finance"""
     try:
         yahoo_symbols = {
             'GOLD': 'GC=F',
@@ -112,7 +121,8 @@ def get_yahoo_historical(symbol, days=30):
         if df is not None and not df.empty and len(df) >= 10:
             return df.iloc[-days:]
         return None
-    except:
+    except Exception as e:
+        logger.error(f"خطا در یاهو: {e}")
         return None
 
 # =============================================
@@ -120,16 +130,13 @@ def get_yahoo_historical(symbol, days=30):
 # =============================================
 
 def get_goldprice_org_price(symbol):
-    """دریافت قیمت لحظه‌ای طلا/نقره از goldprice.org"""
     try:
         url = "https://goldprice.org/live-gold-price.html"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.text, "html.parser")
         text = soup.get_text()
-        
         if symbol == 'GOLD':
             match = re.search(r'Spot Gold Price:\s*USD\s*([\d,]+\.?\d*)', text)
             if match:
@@ -144,26 +151,47 @@ def get_goldprice_org_price(symbol):
         return None
 
 # =============================================
-# ۵. سیستم پشتیبان چندمنبعی با میانگین‌گیری ⭐
+# ۵. دریافت از API NINJAS (پشتیبان جدید) ⭐
+# =============================================
+
+def get_ninjas_price(symbol):
+    """دریافت قیمت طلا از API Ninjas با کلید API"""
+    if not NINJAS_API_KEY:
+        logger.warning("⚠️ NINJAS_API_KEY تنظیم نشده است")
+        return None
+    try:
+        url = "https://api.api-ninjas.com/v1/goldprice"
+        headers = {"X-Api-Key": NINJAS_API_KEY}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            price = data.get('price')
+            if price:
+                logger.info(f"   ✅ API Ninjas: ${price:.2f}")
+                return float(price)
+        else:
+            logger.warning(f"⚠️ API Ninjas خطا: {response.status_code}")
+        return None
+    except Exception as e:
+        logger.error(f"خطا در API Ninjas: {e}")
+        return None
+
+# =============================================
+# ۶. سیستم پشتیبان چندمنبعی با میانگین‌گیری ⭐
 # =============================================
 
 def get_aggregated_price(symbol):
-    """
-    دریافت قیمت از چندین منبع، مقایسه و محاسبه میانگین
-    بازگشت: (قیمت میانگین, دیکشنری قیمت‌های هر منبع, تعداد منابع موفق)
-    """
     prices = {}
     sources = []
-    
-    # تعیین منابع بر اساس نوع دارایی
-    if symbol in ['GOLD', 'SILVER']:
+    if symbol == 'GOLD':
+        sources = ['pyth', 'yahoo', 'goldprice', 'ninjas']
+    elif symbol == 'SILVER':
         sources = ['pyth', 'yahoo', 'goldprice']
-    else:  # BTC, ETH
+    else:
         sources = ['chainlink', 'yahoo']
     
     logger.info(f"🔍 دریافت قیمت {symbol} از {len(sources)} منبع...")
     
-    # دریافت از هر منبع
     for source in sources:
         try:
             if source == 'pyth':
@@ -175,85 +203,67 @@ def get_aggregated_price(symbol):
                 if price:
                     prices[source] = price
                     logger.info(f"   ✅ Pyth: ${price:.2f}")
-            
             elif source == 'chainlink':
                 price = get_chainlink_price(symbol)
                 if price:
                     prices[source] = price
                     logger.info(f"   ✅ Chainlink: ${price:.2f}")
-            
             elif source == 'yahoo':
                 price = get_yahoo_price(symbol)
                 if price:
                     prices[source] = price
                     logger.info(f"   ✅ Yahoo: ${price:.2f}")
-            
             elif source == 'goldprice':
                 price = get_goldprice_org_price(symbol)
                 if price:
                     prices[source] = price
                     logger.info(f"   ✅ Goldprice.org: ${price:.2f}")
-        
+            elif source == 'ninjas':
+                price = get_ninjas_price(symbol)
+                if price:
+                    prices[source] = price
+                    logger.info(f"   ✅ Ninjas: ${price:.2f}")
         except Exception as e:
             logger.warning(f"   ⚠️ خطا در {source}: {e}")
     
-    # بررسی تعداد منابع موفق
     if len(prices) == 0:
         logger.warning(f"⚠️ هیچ منبعی برای {symbol} در دسترس نیست")
         return None, {}, 0
     
-    # محاسبه میانگین
     price_values = list(prices.values())
     avg_price = sum(price_values) / len(price_values)
-    
-    # محاسبه انحراف معیار برای تشخیص داده‌های نامعتبر
     std_dev = np.std(price_values) if len(price_values) > 1 else 0
     
-    # اگر انحراف زیاد باشد، هشدار می‌دهیم
-    if std_dev > avg_price * 0.03:  # اختلاف بیش از ۳٪
+    if std_dev > avg_price * 0.03:
         logger.warning(f"⚠️ اختلاف زیاد بین منابع {symbol}: {std_dev:.2f} (میانگین: {avg_price:.2f})")
     
     logger.info(f"✅ میانگین قیمت {symbol}: ${avg_price:.2f} (از {len(prices)} منبع)")
-    
     return avg_price, prices, len(prices)
 
 def get_market_data_with_aggregation(symbol, days=30):
-    """
-    دریافت داده‌های تاریخی با استفاده از قیمت میانگین برای ساخت داده
-    اولویت اول: Yahoo Finance (داده‌های تاریخی واقعی)
-    در غیر این صورت: ساخت داده از قیمت میانگین
-    """
     logger.info(f"📊 دریافت داده‌های تاریخی برای {symbol}...")
-    
-    # ابتدا سعی می‌کنیم داده‌های تاریخی واقعی از یاهو بگیریم
     historical_df = get_yahoo_historical(symbol, days)
     if historical_df is not None:
         logger.info(f"✅ داده‌های تاریخی {symbol} از یاهو دریافت شد ({len(historical_df)} ردیف)")
         return historical_df
     
-    # اگر یاهو در دسترس نبود، از قیمت میانگین استفاده می‌کنیم
     avg_price, prices, count = get_aggregated_price(symbol)
-    
     if avg_price is None:
         logger.warning(f"⚠️ هیچ قیمتی برای {symbol} دریافت نشد، از داده‌های جایگزین استفاده می‌شود")
         return generate_fallback_data(symbol, days)
     
-    # ساخت داده‌های تاریخی از قیمت میانگین
     logger.info(f"🔄 ساخت داده‌های تاریخی {symbol} از میانگین قیمت {avg_price:.2f}")
     return generate_historical_from_price(avg_price, symbol, days)
 
 # =============================================
-# ۶. ساخت داده‌های تاریخی از یک قیمت
+# ۷. ساخت داده‌های تاریخی از یک قیمت
 # =============================================
 
 def generate_historical_from_price(current_price, symbol, days=30):
-    """ساخت داده‌های تاریخی از یک قیمت لحظه‌ای"""
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    
     vol_map = {'GOLD': 0.015, 'SILVER': 0.025, 'BTC': 0.025, 'ETH': 0.03}
     vol = vol_map.get(symbol, 0.02)
-    
     prices = [current_price]
     for i in range(1, days):
         change = np.random.normal(0, vol)
@@ -263,7 +273,6 @@ def generate_historical_from_price(current_price, symbol, days=30):
         if new_price > prices[-1] * 1.08:
             new_price = prices[-1] * 1.08
         prices.append(new_price)
-    
     return pd.DataFrame({
         'Open': [p * (1 + np.random.normal(0, 0.003)) for p in prices],
         'High': [p * (1 + abs(np.random.normal(0, 0.006))) for p in prices],
@@ -273,20 +282,16 @@ def generate_historical_from_price(current_price, symbol, days=30):
     }, index=dates)
 
 # =============================================
-# ۷. داده‌های جایگزین (آخرین گزینه)
+# ۸. داده‌های جایگزین (آخرین گزینه)
 # =============================================
 
 def generate_fallback_data(symbol, days=30):
-    """تولید داده‌های جایگزین با قیمت‌های تقریبی واقعی (۲۰۲۶)"""
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    
     base_prices = {'GOLD': 4500, 'SILVER': 55, 'BTC': 65000, 'ETH': 3500}
     vol_map = {'GOLD': 0.015, 'SILVER': 0.025, 'BTC': 0.025, 'ETH': 0.03}
-    
     base = base_prices.get(symbol, 100)
     vol = vol_map.get(symbol, 0.02)
-    
     prices = [base]
     for i in range(1, days):
         change = np.random.normal(0, vol)
@@ -296,7 +301,6 @@ def generate_fallback_data(symbol, days=30):
         if new_price > prices[-1] * 1.08:
             new_price = prices[-1] * 1.08
         prices.append(new_price)
-    
     logger.info(f"📊 داده‌های جایگزین برای {symbol} با قیمت پایه {base} ساخته شد")
     return pd.DataFrame({
         'Open': [p * (1 + np.random.normal(0, 0.003)) for p in prices],
@@ -307,7 +311,7 @@ def generate_fallback_data(symbol, days=30):
     }, index=dates)
 
 # =============================================
-# ۸. قیمت طلای ایران
+# ۹. قیمت طلای ایران
 # =============================================
 
 def get_iran_gold():
@@ -322,11 +326,12 @@ def get_iran_gold():
             if txt.isdigit():
                 return int(txt)
         return None
-    except:
+    except Exception as e:
+        logger.error(f"خطا در طلای ایران: {e}")
         return None
 
 # =============================================
-# ۹. کلاس معامله‌گر (بدون تغییر)
+# ۱۰. کلاس معامله‌گر (بدون تغییر)
 # =============================================
 
 class CombinedTrader:
@@ -384,34 +389,27 @@ class CombinedTrader:
         adjusted_risk = base_risk * score_factor
         confidence_factor = confidence / 100.0
         adjusted_risk *= confidence_factor
-        
         if self.config.VOLATILITY_ADJUSTMENT:
             atr_percent = (atr / price) * 100
             if atr_percent > 3:
                 volatility_factor = 3.0 / atr_percent
                 adjusted_risk *= min(volatility_factor, 1.0)
-        
         max_risk = self.capital * self.config.MAX_POSITION_SIZE * self.config.STOP_LOSS
         adjusted_risk = min(adjusted_risk, max_risk)
-        
         stop_distance = max(self.config.STOP_LOSS * price, atr * 1.5)
         if stop_distance <= 0:
             return 0
-        
         position_size = adjusted_risk / stop_distance
         max_position = (self.capital * self.config.MAX_POSITION_SIZE) / price
         position_size = min(position_size, max_position)
-        
         if position_size < 0.001:
             return 0
-        
         logger.info(f"📊 حجم: {position_size:.4f} (ریسک: {adjusted_risk:.2f}, امتیاز: {signal_score:.1f})")
         return position_size
     
     def get_signal_with_reason(self, df, idx):
         if idx < 20:
             return None, 0, {}, 0
-        
         price = df['Close'].iloc[idx]
         rsi = RSIIndicator(df['Close']).rsi().iloc[idx]
         macd = MACD(df['Close']).macd_diff().iloc[idx]
@@ -419,10 +417,8 @@ class CombinedTrader:
         atr_pct = (atr / price) * 100
         sma20 = df['Close'].rolling(20).mean().iloc[idx]
         sma50 = df['Close'].rolling(50).mean().iloc[idx] if idx > 50 else sma20
-        
         reasons = {}
         score = 0
-        
         if rsi < 30:
             score += 1
             reasons['RSI'] = f"اشباع فروش ({rsi:.1f}) → خرید"
@@ -431,14 +427,12 @@ class CombinedTrader:
             reasons['RSI'] = f"اشباع خرید ({rsi:.1f}) → فروش"
         else:
             reasons['RSI'] = f"خنثی ({rsi:.1f})"
-        
         if macd > 0:
             score += 0.5
             reasons['MACD'] = f"مثبت ({macd:.3f}) → صعودی"
         else:
             score -= 0.5
             reasons['MACD'] = f"منفی ({macd:.3f}) → نزولی"
-        
         if price > sma20 and price > sma50:
             score += 0.5
             reasons['میانگین'] = "قیمت بالای SMA20 و SMA50 → صعودی"
@@ -447,7 +441,6 @@ class CombinedTrader:
             reasons['میانگین'] = "قیمت پایین SMA20 و SMA50 → نزولی"
         else:
             reasons['میانگین'] = "خنثی"
-        
         if 0.5 < atr_pct < 5:
             score += 0.5
             reasons['ATR'] = f"نوسان مناسب ({atr_pct:.1f}%)"
@@ -456,7 +449,6 @@ class CombinedTrader:
             reasons['ATR'] = f"نوسان بسیار بالا ({atr_pct:.1f}%)"
         else:
             reasons['ATR'] = f"نوسان کم ({atr_pct:.1f}%)"
-        
         if idx > 20:
             price_prev = df['Close'].iloc[idx-5]
             rsi_prev = RSIIndicator(df['Close']).rsi().iloc[idx-5]
@@ -466,7 +458,6 @@ class CombinedTrader:
             elif price > price_prev and rsi < rsi_prev:
                 reasons['دایورجنس'] = "🔴 نزولی (قیمت بالاتر، RSI پایین‌تر) → فروش قوی"
                 score -= 1
-        
         if score >= 1.5:
             return 'BUY', min(60 + score * 5, 95), reasons, score
         elif score <= -1.5:
@@ -477,14 +468,11 @@ class CombinedTrader:
     def process(self, df, symbol):
         if df.empty or len(df) < 20:
             return None, None
-        
         last_idx = len(df) - 1
         current_price = df['Close'].iloc[last_idx]
         timestamp = df.index[last_idx]
-        
         new_entries = []
         closed_trades = []
-        
         for sym in list(self.open_positions.keys()):
             pos = self.open_positions[sym]
             if pos['type'] == 'BUY':
@@ -505,7 +493,6 @@ class CombinedTrader:
                     closed = self.close_trade(sym, pos['tp'], 'TAKE PROFIT', timestamp)
                     if closed:
                         closed_trades.append(closed)
-        
         if symbol not in self.open_positions:
             signal, confidence, reasons, score = self.get_signal_with_reason(df, last_idx)
             if confidence >= self.config.MIN_CONFIDENCE and signal in ['BUY', 'SELL']:
@@ -516,7 +503,6 @@ class CombinedTrader:
                     entry = self.open_trade(symbol, signal, price, size, atr, reasons, confidence, timestamp, score)
                     if entry:
                         new_entries.append(entry)
-        
         self.save_state()
         return new_entries, closed_trades
     
@@ -528,7 +514,6 @@ class CombinedTrader:
         else:
             sl = price * (1 + self.config.STOP_LOSS)
             tp = price * (1 - self.config.TAKE_PROFIT)
-        
         self.open_positions[symbol] = {
             'type': signal,
             'entry': price,
@@ -541,7 +526,6 @@ class CombinedTrader:
             'confidence': confidence,
             'score': score
         }
-        
         return {
             'symbol': symbol,
             'direction': direction,
@@ -566,7 +550,6 @@ class CombinedTrader:
             pnl_percent = (pos['entry'] - price) / pos['entry']
         pnl_amount = pnl_percent * pos['size'] * pos['entry']
         self.capital += pnl_amount
-        
         trade_record = {
             'symbol': symbol,
             'type': pos['type'],
@@ -626,7 +609,7 @@ class CombinedTrader:
         }
 
 # =============================================
-# ۱۰. توابع تولید پیام‌های تلگرامی
+# ۱۱. توابع تولید پیام‌های تلگرامی
 # =============================================
 
 def format_entry_message(entry):
@@ -668,7 +651,6 @@ def format_exit_message(trade):
 
 def format_status_report(metrics_all, iran_price):
     now = datetime.now(pytz.timezone("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S")
-    
     open_positions_text = ""
     for symbol, metrics in metrics_all.items():
         if metrics['open_positions']:
@@ -679,16 +661,13 @@ def format_status_report(metrics_all, iran_price):
                 else:
                     float_pnl = (pos['entry'] - current_price) / pos['entry'] * 100
                 open_positions_text += f"• {sym}: {pos['direction']} @ ${pos['entry']:.2f} | قیمت فعلی: ${current_price:.2f} | سود/زیان شناور: {float_pnl:+.2f}% | TP: ${pos['tp']:.2f} | SL: ${pos['sl']:.2f} | امتیاز ورود: {pos['score']:.1f}\n"
-    
     if not open_positions_text:
         open_positions_text = "هیچ پوزیشن بازی وجود ندارد. در انتظار سیگنال جدید...\n"
-    
     total_cap = sum(m['capital'] for m in metrics_all.values())
     total_ret = (total_cap - 10000) / 10000 * 100
     total_trades = sum(m['trades'] for m in metrics_all.values())
     total_wins = sum(m['wins'] for m in metrics_all.values())
     win_rate = (total_wins / max(1, total_trades) * 100)
-    
     report = f"""
 🧠 **گزارش وضعیت لایو تریدینگ ترکیبی (سرمایه پویا)**
 ⏰ زمان: {now}
@@ -699,7 +678,7 @@ def format_status_report(metrics_all, iran_price):
 
 📌 **سرمایه کل:** ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
 📌 **استراتژی حجم:** بر اساس قدرت سیگنال و نوسان (پویا)
-📌 **منابع داده:** Pyth/Chainlink + Yahoo + Goldprice.org (میانگین‌گیری)
+📌 **منابع داده:** Pyth/Chainlink + Yahoo + Goldprice.org + API Ninjas (میانگین‌گیری)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -717,7 +696,6 @@ def format_status_report(metrics_all, iran_price):
 """
     for symbol, metrics in metrics_all.items():
         report += f"📌 {symbol}: سرمایه {metrics['capital']:,.2f} | بازده {metrics['return']:+.2f}% | معاملات {metrics['trades']}\n"
-    
     report += f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -729,7 +707,7 @@ def format_status_report(metrics_all, iran_price):
     return report.strip()
 
 # =============================================
-# ۱۱. ارسال به تلگرام
+# ۱۲. ارسال به تلگرام
 # =============================================
 
 async def send_telegram(text):
@@ -754,41 +732,34 @@ async def send_telegram(text):
         return False
 
 # =============================================
-# ۱۲. تابع اصلی
+# ۱۳. تابع اصلی
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی...")
-    
-    # حذف فایل‌های حالت قدیمی
+    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی (شامل API Ninjas)...")
     for f in ['state_gold.json', 'state_silver.json', 'state_btc.json', 'state_eth.json', 'state_combined.json']:
         if os.path.exists(f):
             os.remove(f)
             logger.info(f"🗑️ فایل {f} حذف شد")
-    
     iran = get_iran_gold()
     if iran is None:
         iran = 210_000_000
     
-    # دریافت داده‌ها با سیستم میانگین‌گیری
     gold_df = get_market_data_with_aggregation('GOLD', days=30)
     silver_df = get_market_data_with_aggregation('SILVER', days=30)
     btc_df = get_market_data_with_aggregation('BTC', days=30)
     eth_df = get_market_data_with_aggregation('ETH', days=30)
     
-    # ایجاد تریدرها
     trader_gold = CombinedTrader(capital=2500, symbol='GOLD')
     trader_silver = CombinedTrader(capital=2500, symbol='SILVER')
     trader_btc = CombinedTrader(capital=2500, symbol='BTC')
     trader_eth = CombinedTrader(capital=2500, symbol='ETH')
     
-    # پردازش
     entries_gold, exits_gold = trader_gold.process(gold_df, 'GOLD')
     entries_silver, exits_silver = trader_silver.process(silver_df, 'SILVER')
     entries_btc, exits_btc = trader_btc.process(btc_df, 'BTC')
     entries_eth, exits_eth = trader_eth.process(eth_df, 'ETH')
     
-    # ارسال پیام‌ها
     for entry in entries_gold + entries_silver + entries_btc + entries_eth:
         await send_telegram(format_entry_message(entry))
     
@@ -803,7 +774,6 @@ async def main():
     }
     status_report = format_status_report(metrics_all, iran)
     await send_telegram(status_report)
-    
     logger.info("🏁 پایان اجرا")
 
 if __name__ == "__main__":
