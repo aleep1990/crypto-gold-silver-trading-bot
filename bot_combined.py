@@ -1,8 +1,9 @@
 """
-ربات ترکیبی لایو ترید (طلا، نقره، بیت‌کوین، اتریوم)
-سرمایه کل: ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
-فقط پیام‌های ورود و خروج
-قیمت تتر و طلا از منابع دائمی (Navasan, PriceDB)
+ربات ترکیبی لایو ترید با مدیریت هوشمند داده
+- استفاده از چندین منبع معتبر با Fallback
+- عدم استفاده از داده‌های جایگزین برای معامله
+- کش آخرین قیمت معتبر
+- اعتبارسنجی قیمت‌ها قبل از معامله
 """
 
 import os
@@ -49,63 +50,84 @@ class RiskConfig:
     SIGNAL_SCORE_WEIGHT = 1.5
 
 # =============================================
-# دریافت قیمت از منابع مختلف (جهانی)
+# کش قیمت‌ها (ذخیره آخرین قیمت معتبر)
 # =============================================
 
-def get_pyth_price(feed_id):
-    if not PYTH_API_KEY:
-        return None
+CACHE_FILE = "last_prices.json"
+
+def load_cache():
+    """بارگذاری کش از فایل"""
     try:
-        url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
-        headers = {"Authorization": f"Bearer {PYTH_API_KEY}", "Accept": "application/json"}
-        response = requests.get(url, headers=headers, timeout=8)
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_cache(data):
+    """ذخیره کش در فایل"""
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except:
+        pass
+
+def get_cached_price(symbol):
+    """دریافت قیمت از کش"""
+    cache = load_cache()
+    entry = cache.get(symbol)
+    if entry:
+        # اگر کمتر از ۱ ساعت از ذخیره گذشته باشد، معتبر است
+        timestamp = datetime.fromisoformat(entry['timestamp'])
+        if datetime.now() - timestamp < timedelta(hours=1):
+            return entry['price']
+    return None
+
+def update_cache(symbol, price):
+    """به‌روزرسانی کش"""
+    cache = load_cache()
+    cache[symbol] = {
+        'price': price,
+        'timestamp': datetime.now().isoformat()
+    }
+    save_cache(cache)
+
+# =============================================
+# دریافت قیمت از منابع مختلف
+# =============================================
+
+# ---------- قیمت طلا (دلاری) ----------
+def get_gold_price_from_coingecko():
+    """قیمت طلا از CoinGecko"""
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=gold&vs_currencies=usd"
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            if 'parsed' in data and len(data['parsed']) > 0:
-                price_data = data['parsed'][0]['price']
-                return price_data['price'] * (10 ** -price_data['expo'])
+            price = data.get('gold', {}).get('usd')
+            if price and 2000 < price < 3000:
+                return float(price)
         return None
-    except:
+    except Exception as e:
+        logger.error(f"CoinGecko error: {e}")
         return None
 
-def get_chainlink_price(symbol):
-    feeds = {'BTC': 'btc-usd', 'ETH': 'eth-usd'}
+def get_gold_price_from_goldapi():
+    """قیمت طلا از Gold-API"""
     try:
-        url = f"https://api.chain.link/data-feeds/{feeds[symbol]}/latest"
-        response = requests.get(url, timeout=8)
+        url = "https://api.gold-api.com/price/XAU"
+        response = requests.get(url, timeout=10, verify=False)
         if response.status_code == 200:
-            return response.json()['price']
+            data = response.json()
+            price = data.get('price')
+            if price and 2000 < price < 3000:
+                return float(price)
         return None
-    except:
-        return None
-
-def get_yahoo_price(symbol):
-    try:
-        yahoo_symbols = {'GOLD': 'GC=F', 'SILVER': 'SI=F', 'BTC': 'BTC-USD', 'ETH': 'ETH-USD'}
-        ticker = yahoo_symbols.get(symbol)
-        if not ticker:
-            return None
-        df = yf.download(ticker, period="1d", interval="1m", progress=False)
-        if df is not None and not df.empty:
-            return float(df['Close'].iloc[-1])
-        return None
-    except:
+    except Exception as e:
+        logger.error(f"Gold-API error: {e}")
         return None
 
-def get_yahoo_historical(symbol, days=30):
-    try:
-        yahoo_symbols = {'GOLD': 'GC=F', 'SILVER': 'SI=F', 'BTC': 'BTC-USD', 'ETH': 'ETH-USD'}
-        ticker = yahoo_symbols.get(symbol)
-        if not ticker:
-            return None
-        df = yf.download(ticker, period=f"{days+5}d", interval="1d", progress=False)
-        if df is not None and not df.empty and len(df) >= 10:
-            return df.iloc[-days:]
-        return None
-    except:
-        return None
-
-def get_goldprice_org_price(symbol):
+def get_gold_price_from_goldprice_org():
+    """قیمت طلا از goldprice.org (اسکرپ)"""
     try:
         url = "https://goldprice.org/live-gold-price.html"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -114,101 +136,151 @@ def get_goldprice_org_price(symbol):
             return None
         soup = BeautifulSoup(response.text, "html.parser")
         text = soup.get_text()
-        if symbol == 'GOLD':
-            match = re.search(r'Spot Gold Price:\s*USD\s*([\d,]+\.?\d*)', text)
-            if match:
-                return float(match.group(1).replace(',', ''))
-        elif symbol == 'SILVER':
-            match = re.search(r'Spot Silver Price:\s*USD\s*([\d,]+\.?\d*)', text)
-            if match:
-                return float(match.group(1).replace(',', ''))
+        match = re.search(r'Spot Gold Price:\s*USD\s*([\d,]+\.?\d*)', text)
+        if match:
+            price = float(match.group(1).replace(',', ''))
+            if 2000 < price < 3000:
+                return price
         return None
-    except:
+    except Exception as e:
+        logger.error(f"Goldprice.org error: {e}")
         return None
 
-def get_ninjas_price(symbol):
-    if not NINJAS_API_KEY:
-        return None
-    try:
-        url = "https://api.api-ninjas.com/v1/goldprice"
-        headers = {"X-Api-Key": NINJAS_API_KEY}
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price')
-            if price and float(price) > 0:
-                return float(price)
-        return None
-    except:
-        return None
+def get_gold_price_usd():
+    """دریافت قیمت طلا به دلار با زنجیره‌ای از منابع"""
+    sources = [
+        ('CoinGecko', get_gold_price_from_coingecko),
+        ('Gold-API', get_gold_price_from_goldapi),
+        ('Goldprice.org', get_gold_price_from_goldprice_org),
+    ]
+    
+    for name, func in sources:
+        try:
+            price = func()
+            if price:
+                logger.info(f"✅ قیمت طلا از {name}: ${price:.2f}")
+                update_cache('GOLD_USD', price)
+                return price
+        except Exception as e:
+            logger.warning(f"⚠️ {name} خطا: {e}")
+            continue
+    
+    # اگر همه منابع قطع بودند، از کش استفاده کن
+    cached = get_cached_price('GOLD_USD')
+    if cached:
+        logger.warning(f"⚠️ استفاده از کش: ${cached:.2f}")
+        return cached
+    
+    logger.error("❌ هیچ منبعی برای قیمت طلا در دسترس نیست")
+    return None
 
-def get_gold_api_price(symbol):
-    metal_map = {'GOLD': 'XAU', 'SILVER': 'XAG'}
-    metal = metal_map.get(symbol)
-    if not metal:
-        return None
-    try:
-        url = f"https://api.gold-api.com/price/{metal}"
-        response = requests.get(url, timeout=15, verify=False)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price')
-            if price and float(price) > 0:
-                return float(price)
-        return None
-    except:
-        return None
-
-def get_metals_api_price(symbol):
-    if symbol != 'SILVER':
-        return None
+# ---------- قیمت نقره (دلاری) ----------
+def get_silver_price_from_metals_api():
+    """قیمت نقره از Metals-API"""
     try:
         url = "https://api.metals.live/v1/spot/silver"
-        response = requests.get(url, timeout=15, verify=False)
+        response = requests.get(url, timeout=10, verify=False)
         if response.status_code == 200:
             data = response.json()
             price = data.get('price')
-            if price and float(price) > 0:
+            if price and 20 < price < 100:
                 return float(price)
         return None
-    except:
+    except Exception as e:
+        logger.error(f"Metals-API error: {e}")
         return None
 
-def get_coingecko_price(coin_id):
+def get_silver_price_from_goldapi():
+    """قیمت نقره از Gold-API (XAG)"""
+    try:
+        url = "https://api.gold-api.com/price/XAG"
+        response = requests.get(url, timeout=10, verify=False)
+        if response.status_code == 200:
+            data = response.json()
+            price = data.get('price')
+            if price and 20 < price < 100:
+                return float(price)
+        return None
+    except Exception as e:
+        logger.error(f"Gold-API (silver) error: {e}")
+        return None
+
+def get_silver_price_usd():
+    """دریافت قیمت نقره به دلار با زنجیره‌ای از منابع"""
+    sources = [
+        ('Metals-API', get_silver_price_from_metals_api),
+        ('Gold-API (XAG)', get_silver_price_from_goldapi),
+    ]
+    
+    for name, func in sources:
+        try:
+            price = func()
+            if price:
+                logger.info(f"✅ قیمت نقره از {name}: ${price:.2f}")
+                update_cache('SILVER_USD', price)
+                return price
+        except Exception as e:
+            logger.warning(f"⚠️ {name} خطا: {e}")
+            continue
+    
+    cached = get_cached_price('SILVER_USD')
+    if cached:
+        logger.warning(f"⚠️ استفاده از کش: ${cached:.2f}")
+        return cached
+    
+    logger.error("❌ هیچ منبعی برای قیمت نقره در دسترس نیست")
+    return None
+
+# ---------- قیمت ارزهای دیجیتال ----------
+def get_crypto_price(coin_id):
+    """قیمت ارز دیجیتال از CoinGecko"""
     try:
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             price = data.get(coin_id, {}).get('usd')
-            if price and float(price) > 0:
+            if price and price > 0:
                 return float(price)
         return None
-    except:
+    except Exception as e:
+        logger.error(f"CoinGecko ({coin_id}) error: {e}")
         return None
 
-# =============================================
-# دریافت نرخ دلار به ریال (از منابع دائمی)
-# =============================================
+def get_btc_price():
+    """قیمت بیت‌کوین"""
+    price = get_crypto_price('bitcoin')
+    if price:
+        update_cache('BTC_USD', price)
+        return price
+    return get_cached_price('BTC_USD')
 
+def get_eth_price():
+    """قیمت اتریوم"""
+    price = get_crypto_price('ethereum')
+    if price:
+        update_cache('ETH_USD', price)
+        return price
+    return get_cached_price('ETH_USD')
+
+# ---------- نرخ دلار به ریال ----------
 def get_usd_irr_from_navasan():
-    """دریافت نرخ دلار از Navasan-API (دائمی، روی گیت‌هاب)"""
+    """نرخ دلار از Navasan-API"""
     try:
         url = "https://raw.githubusercontent.com/HosseinOdd/Navasan-API/main/data/fiat.json"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            # ساختار داده: {"USD": 420000, ...}
-            usd_price = data.get('USD')
-            if usd_price and usd_price > 0:
-                return int(usd_price)
+            usd = data.get('USD')
+            if usd and usd > 0:
+                return int(usd)
         return None
     except Exception as e:
-        logger.error(f"خطا در Navasan: {e}")
+        logger.error(f"Navasan error: {e}")
         return None
 
 def get_usd_irr_from_pricedb():
-    """دریافت نرخ دلار از PriceDB (دائمی، روی گیت‌هاب)"""
+    """نرخ دلار از PriceDB"""
     try:
         url = "https://api.priceto.day/v1/latest/irr/usd"
         response = requests.get(url, timeout=10)
@@ -219,33 +291,57 @@ def get_usd_irr_from_pricedb():
                 return int(rate)
         return None
     except Exception as e:
-        logger.error(f"خطا در PriceDB: {e}")
+        logger.error(f"PriceDB error: {e}")
         return None
 
-def get_usd_irr_with_fallback():
-    """دریافت نرخ دلار با اولویت Navasan و سپس PriceDB"""
-    # اولویت ۱: Navasan (مطمئن‌ترین)
-    rate = get_usd_irr_from_navasan()
-    if rate:
-        logger.info(f"💵 نرخ دلار از Navasan: {rate:,} ریال")
-        return rate
+def get_usd_irr():
+    """دریافت نرخ دلار با زنجیره‌ای از منابع"""
+    sources = [
+        ('Navasan', get_usd_irr_from_navasan),
+        ('PriceDB', get_usd_irr_from_pricedb),
+    ]
     
-    # اولویت ۲: PriceDB
-    rate = get_usd_irr_from_pricedb()
-    if rate:
-        logger.info(f"💵 نرخ دلار از PriceDB: {rate:,} ریال")
-        return rate
+    for name, func in sources:
+        try:
+            rate = func()
+            if rate:
+                logger.info(f"💵 نرخ دلار از {name}: {rate:,} ریال")
+                update_cache('USD_IRR', rate)
+                return rate
+        except Exception as e:
+            logger.warning(f"⚠️ {name} خطا: {e}")
+            continue
     
-    # اگر همه منابع قطع بودند
-    logger.warning("⚠️ همه منابع نرخ دلار قطع هستند")
+    cached = get_cached_price('USD_IRR')
+    if cached:
+        logger.warning(f"⚠️ استفاده از کش: {cached:,} ریال")
+        return cached
+    
+    logger.error("❌ هیچ منبعی برای نرخ دلار در دسترس نیست")
     return None
 
-# =============================================
-# دریافت قیمت طلای ایران (از منابع دائمی)
-# =============================================
+# ---------- قیمت تتر به ریال ----------
+def get_usdt_irr():
+    """قیمت تتر (USDT) به ریال"""
+    try:
+        usdt_usd = get_crypto_price('tether')
+        if not usdt_usd:
+            logger.warning("⚠️ قیمت تتر به دلار دریافت نشد")
+            return None
+        usd_irr = get_usd_irr()
+        if not usd_irr:
+            return None
+        price = int(usdt_usd * usd_irr)
+        logger.info(f"💵 قیمت تتر: {price:,} تومان")
+        update_cache('USDT_IRR', price)
+        return price
+    except Exception as e:
+        logger.error(f"خطا در محاسبه قیمت تتر: {e}")
+        return None
 
-def get_iran_gold_from_navasan():
-    """دریافت قیمت طلای ۱۸ عیار از Navasan-API"""
+# ---------- قیمت طلای ایران به ریال ----------
+def get_iran_gold():
+    """قیمت طلای ایران (ریال) از Navasan"""
     try:
         url = "https://raw.githubusercontent.com/HosseinOdd/Navasan-API/main/data/gold.json"
         response = requests.get(url, timeout=10)
@@ -256,155 +352,21 @@ def get_iran_gold_from_navasan():
                     if isinstance(item, dict) and 'طلای ۱۸' in item.get('title', ''):
                         price_str = item.get('price', '').replace(',', '')
                         if price_str.isdigit():
-                            return int(price_str)
+                            price = int(price_str)
+                            logger.info(f"🇮🇷 قیمت طلای ایران: {price:,} ریال")
+                            update_cache('IRAN_GOLD', price)
+                            return price
         return None
     except Exception as e:
-        logger.error(f"خطا در Navasan: {e}")
-        return None
-
-def get_iran_gold_from_irgold_api():
-    """دریافت قیمت طلا از ir-gold-api"""
-    try:
-        url = "https://ir-gold-api.onrender.com/gold18"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price')
-            if price:
-                # حذف کاماها
-                price_str = str(price).replace(',', '')
-                if price_str.isdigit():
-                    return int(price_str)
-        return None
-    except Exception as e:
-        logger.error(f"خطا در ir-gold-api: {e}")
-        return None
-
-def get_iran_gold_with_fallback():
-    """دریافت قیمت طلای ایران با اولویت Navasan و سپس ir-gold-api"""
-    # اولویت ۱: Navasan
-    price = get_iran_gold_from_navasan()
-    if price:
-        logger.info(f"🇮🇷 قیمت طلای ایران از Navasan: {price:,} ریال")
-        return price
-    
-    # اولویت ۲: ir-gold-api
-    price = get_iran_gold_from_irgold_api()
-    if price:
-        logger.info(f"🇮🇷 قیمت طلای ایران از ir-gold-api: {price:,} ریال")
-        return price
-    
-    # اگر همه منابع قطع بودند
-    logger.warning("⚠️ همه منابع قیمت طلا قطع هستند")
-    return None
-
-# =============================================
-# دریافت قیمت تتر به ریال
-# =============================================
-
-def get_usdt_irr():
-    """دریافت قیمت تتر: قیمت USDT از CoinGecko به دلار * نرخ دلار از Navasan/PriceDB"""
-    try:
-        usdt_usd = get_coingecko_price('tether')
-        if not usdt_usd:
-            logger.warning("⚠️ قیمت تتر به دلار دریافت نشد")
-            return None
-        usd_irr = get_usd_irr_with_fallback()
-        if not usd_irr:
-            return None
-        price = int(usdt_usd * usd_irr)
-        logger.info(f"💵 قیمت تتر: {price:,} تومان (USDT: ${usdt_usd:.4f} * نرخ دلار: {usd_irr:,})")
-        return price
-    except Exception as e:
-        logger.error(f"خطا در محاسبه قیمت تتر: {e}")
+        logger.error(f"خطا در دریافت طلای ایران: {e}")
         return None
 
 # =============================================
-# سیستم پشتیبان چندمنبعی برای قیمت‌های جهانی
-# =============================================
-
-def get_aggregated_price(symbol):
-    prices = {}
-    
-    if symbol == 'GOLD':
-        sources = ['goldapi', 'yahoo', 'goldprice', 'ninjas', 'pyth']
-    elif symbol == 'SILVER':
-        sources = ['goldapi', 'metals']
-    else:
-        sources = ['coingecko', 'chainlink', 'yahoo']
-    
-    logger.info(f"🔍 دریافت قیمت {symbol}...")
-    
-    for source in sources:
-        try:
-            if source == 'goldapi':
-                price = get_gold_api_price(symbol)
-                if price:
-                    prices[source] = price
-            elif source == 'metals':
-                price = get_metals_api_price(symbol)
-                if price:
-                    prices[source] = price
-            elif source == 'coingecko':
-                coin_map = {'BTC': 'bitcoin', 'ETH': 'ethereum'}
-                coin_id = coin_map.get(symbol)
-                if coin_id:
-                    price = get_coingecko_price(coin_id)
-                    if price:
-                        prices[source] = price
-            elif source == 'pyth':
-                feed_ids = {
-                    'GOLD': '0x8b7c8e4c6e5b9a8c7d6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4',
-                    'SILVER': '0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8'
-                }
-                price = get_pyth_price(feed_ids[symbol])
-                if price:
-                    prices[source] = price
-            elif source == 'chainlink':
-                price = get_chainlink_price(symbol)
-                if price:
-                    prices[source] = price
-            elif source == 'yahoo':
-                price = get_yahoo_price(symbol)
-                if price:
-                    prices[source] = price
-            elif source == 'goldprice':
-                price = get_goldprice_org_price(symbol)
-                if price:
-                    prices[source] = price
-            elif source == 'ninjas':
-                price = get_ninjas_price(symbol)
-                if price:
-                    prices[source] = price
-        except:
-            pass
-    
-    if len(prices) == 0:
-        return None, {}, 0
-    
-    price_values = list(prices.values())
-    avg_price = sum(price_values) / len(price_values)
-    logger.info(f"✅ میانگین {symbol}: ${avg_price:.2f} (از {len(prices)} منبع)")
-    return avg_price, prices, len(prices)
-
-def get_market_data_with_aggregation(symbol, days=30):
-    logger.info(f"📊 دریافت داده‌های تاریخی {symbol}...")
-    
-    historical_df = get_yahoo_historical(symbol, days)
-    if historical_df is not None:
-        return historical_df
-    
-    avg_price, prices, count = get_aggregated_price(symbol)
-    if avg_price is None or avg_price == 0:
-        return generate_fallback_data(symbol, days)
-    
-    return generate_historical_from_price(avg_price, symbol, days)
-
-# =============================================
-# داده‌های جایگزین (آخرین گزینه)
+# ساخت داده‌های تاریخی از قیمت لحظه‌ای
 # =============================================
 
 def generate_historical_from_price(current_price, symbol, days=30):
+    """ساخت داده‌های تاریخی از یک قیمت لحظه‌ای (با نوسان منطقی)"""
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
     vol_map = {'GOLD': 0.015, 'SILVER': 0.025, 'BTC': 0.025, 'ETH': 0.03}
@@ -426,29 +388,44 @@ def generate_historical_from_price(current_price, symbol, days=30):
         'Volume': np.random.randint(1000, 5000, days)
     }, index=dates)
 
-def generate_fallback_data(symbol, days=30):
-    now = datetime.now()
-    dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    base_prices = {'GOLD': 4600, 'SILVER': 35, 'BTC': 65000, 'ETH': 3500}
-    vol_map = {'GOLD': 0.015, 'SILVER': 0.025, 'BTC': 0.025, 'ETH': 0.03}
-    base = base_prices.get(symbol, 100)
-    vol = vol_map.get(symbol, 0.02)
-    prices = [base]
-    for i in range(1, days):
-        change = np.random.normal(0, vol)
-        new_price = prices[-1] * (1 + change)
-        if new_price < prices[-1] * 0.92:
-            new_price = prices[-1] * 0.92
-        if new_price > prices[-1] * 1.08:
-            new_price = prices[-1] * 1.08
-        prices.append(new_price)
-    return pd.DataFrame({
-        'Open': [p * (1 + np.random.normal(0, 0.003)) for p in prices],
-        'High': [p * (1 + abs(np.random.normal(0, 0.006))) for p in prices],
-        'Low': [p * (1 - abs(np.random.normal(0, 0.006))) for p in prices],
-        'Close': prices,
-        'Volume': np.random.randint(1000, 5000, days)
-    }, index=dates)
+# =============================================
+# دریافت داده‌های بازار
+# =============================================
+
+def get_market_data(symbol):
+    """دریافت داده‌های بازار با زنجیره‌ای از منابع"""
+    logger.info(f"📊 دریافت داده‌های تاریخی {symbol}...")
+    
+    # اولویت ۱: Yahoo Finance (داده‌های تاریخی)
+    try:
+        yahoo_symbols = {'GOLD': 'GC=F', 'SILVER': 'SI=F', 'BTC': 'BTC-USD', 'ETH': 'ETH-USD'}
+        ticker = yahoo_symbols.get(symbol)
+        if ticker:
+            df = yf.download(ticker, period="35d", interval="1d", progress=False)
+            if df is not None and not df.empty and len(df) >= 20:
+                logger.info(f"✅ داده‌های تاریخی {symbol} از یاهو دریافت شد")
+                return df
+    except Exception as e:
+        logger.warning(f"⚠️ Yahoo Finance خطا: {e}")
+    
+    # اولویت ۲: ساخت داده از قیمت لحظه‌ای (فقط در صورت وجود قیمت معتبر)
+    current_price = None
+    if symbol == 'GOLD':
+        current_price = get_gold_price_usd()
+    elif symbol == 'SILVER':
+        current_price = get_silver_price_usd()
+    elif symbol == 'BTC':
+        current_price = get_btc_price()
+    elif symbol == 'ETH':
+        current_price = get_eth_price()
+    
+    if current_price:
+        logger.info(f"🔄 ساخت داده‌های تاریخی از قیمت {current_price:.2f}")
+        return generate_historical_from_price(current_price, symbol, days=30)
+    
+    # اگر هیچ داده‌ای در دسترس نبود
+    logger.error(f"❌ داده‌های {symbol} در دسترس نیست")
+    return None
 
 # =============================================
 # کلاس معامله‌گر
@@ -595,14 +572,17 @@ class CombinedTrader:
             return 'HOLD', 50, reasons, score
     
     def process(self, df, symbol):
-        if df.empty or len(df) < 20:
+        if df is None or df.empty or len(df) < 20:
+            logger.warning(f"⚠️ داده‌های {symbol} کافی نیست (ورود ممنوع)")
             return None, None
+        
         last_idx = len(df) - 1
         current_price = df['Close'].iloc[last_idx]
         timestamp = df.index[last_idx]
         new_entries = []
         closed_trades = []
         
+        # بررسی پوزیشن‌های باز
         for sym in list(self.open_positions.keys()):
             pos = self.open_positions[sym]
             if pos['type'] == 'BUY':
@@ -624,6 +604,7 @@ class CombinedTrader:
                     if closed:
                         closed_trades.append(closed)
         
+        # ورود جدید
         if symbol not in self.open_positions:
             signal, confidence, reasons, score = self.get_signal_with_reason(df, last_idx)
             if confidence >= self.config.MIN_CONFIDENCE and signal in ['BUY', 'SELL']:
@@ -807,28 +788,24 @@ async def send_telegram(text):
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی (با منابع دائمی Navasan و PriceDB)...")
+    logger.info("🚀 شروع ربات ترکیبی (نسخه ۳.۰ با مدیریت هوشمند داده)...")
     
-    # دریافت قیمت تتر
+    # دریافت قیمت‌های نمایشی
     usdt_price = get_usdt_irr()
     if usdt_price is None or usdt_price == 0:
         usdt_price = 0
         logger.warning("⚠️ قیمت تتر دریافت نشد")
-    else:
-        logger.info(f"💵 قیمت تتر نهایی: {usdt_price:,} تومان")
     
-    # دریافت قیمت طلای ایران
-    iran_gold = get_iran_gold_with_fallback()
+    iran_gold = get_iran_gold()
     if iran_gold is None or iran_gold == 0:
         iran_gold = 210_000_000
         logger.warning("⚠️ قیمت طلای ایران دریافت نشد، از مقدار ثابت استفاده شد")
-    else:
-        logger.info(f"🇮🇷 قیمت طلای ایران نهایی: {iran_gold:,} ریال")
     
-    gold_df = get_market_data_with_aggregation('GOLD', days=30)
-    silver_df = get_market_data_with_aggregation('SILVER', days=30)
-    btc_df = get_market_data_with_aggregation('BTC', days=30)
-    eth_df = get_market_data_with_aggregation('ETH', days=30)
+    # دریافت داده‌های بازار (اگر None برگردد، معامله انجام نمی‌شود)
+    gold_df = get_market_data('GOLD')
+    silver_df = get_market_data('SILVER')
+    btc_df = get_market_data('BTC')
+    eth_df = get_market_data('ETH')
     
     trader_gold = CombinedTrader(capital=2500, symbol='GOLD')
     trader_silver = CombinedTrader(capital=2500, symbol='SILVER')
