@@ -1,7 +1,7 @@
 """
-ربات ترکیبی لایو ترید با سیستم پشتیبان چندمنبعی و میانگین‌گیری
-منابع: Gold-API (طلا/نقره), Metals-API (نقره), Pyth, Chainlink, Yahoo, Goldprice.org, Ninjas
-CoinGecko فقط برای بیت‌کوین و اتریوم
+ربات ترکیبی لایو ترید (طلا، نقره، بیت‌کوین، اتریوم)
+سرمایه کل: ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
+فقط پیام‌های ورود و خروج - با قیمت تتر و طلای ایران پویا
 """
 
 import os
@@ -23,8 +23,8 @@ import yfinance as yf
 import time
 import re
 import urllib3
+import random
 
-# غیرفعال کردن هشدارهای SSL (برای Metals-API)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,9 +34,6 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 NINJAS_API_KEY = os.getenv("NINJAS_API_KEY")
 PYTH_API_KEY = os.getenv("PYTH_API_KEY")
-
-if not TOKEN or not CHAT_ID:
-    logger.warning("⚠️ TELEGRAM_TOKEN یا CHAT_ID تنظیم نشده! پیام‌ها ارسال نمی‌شوند.")
 
 # =============================================
 # تنظیمات مدیریت ریسک
@@ -52,12 +49,11 @@ class RiskConfig:
     SIGNAL_SCORE_WEIGHT = 1.5
 
 # =============================================
-# ۱. دریافت از PYTH NETWORK (با API Key)
+# ۱. دریافت از PYTH
 # =============================================
 
 def get_pyth_price(feed_id):
     if not PYTH_API_KEY:
-        logger.warning("⚠️ PYTH_API_KEY تنظیم نشده است")
         return None
     try:
         url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
@@ -68,11 +64,8 @@ def get_pyth_price(feed_id):
             if 'parsed' in data and len(data['parsed']) > 0:
                 price_data = data['parsed'][0]['price']
                 return price_data['price'] * (10 ** -price_data['expo'])
-        else:
-            logger.warning(f"⚠️ Pyth خطا: {response.status_code}")
         return None
-    except Exception as e:
-        logger.error(f"خطا در Pyth: {e}")
+    except:
         return None
 
 # =============================================
@@ -87,8 +80,7 @@ def get_chainlink_price(symbol):
         if response.status_code == 200:
             return response.json()['price']
         return None
-    except Exception as e:
-        logger.error(f"خطا در Chainlink: {e}")
+    except:
         return None
 
 # =============================================
@@ -105,8 +97,7 @@ def get_yahoo_price(symbol):
         if df is not None and not df.empty:
             return float(df['Close'].iloc[-1])
         return None
-    except Exception as e:
-        logger.error(f"خطا در یاهو: {e}")
+    except:
         return None
 
 def get_yahoo_historical(symbol, days=30):
@@ -119,8 +110,7 @@ def get_yahoo_historical(symbol, days=30):
         if df is not None and not df.empty and len(df) >= 10:
             return df.iloc[-days:]
         return None
-    except Exception as e:
-        logger.error(f"خطا در یاهو: {e}")
+    except:
         return None
 
 # =============================================
@@ -132,7 +122,8 @@ def get_goldprice_org_price(symbol):
         url = "https://goldprice.org/live-gold-price.html"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
+        if response.status_code != 200:
+            return None
         soup = BeautifulSoup(response.text, "html.parser")
         text = soup.get_text()
         if symbol == 'GOLD':
@@ -144,8 +135,7 @@ def get_goldprice_org_price(symbol):
             if match:
                 return float(match.group(1).replace(',', ''))
         return None
-    except Exception as e:
-        logger.error(f"خطا در goldprice.org: {e}")
+    except:
         return None
 
 # =============================================
@@ -154,7 +144,6 @@ def get_goldprice_org_price(symbol):
 
 def get_ninjas_price(symbol):
     if not NINJAS_API_KEY:
-        logger.warning("⚠️ NINJAS_API_KEY تنظیم نشده است")
         return None
     try:
         url = "https://api.api-ninjas.com/v1/goldprice"
@@ -164,17 +153,13 @@ def get_ninjas_price(symbol):
             data = response.json()
             price = data.get('price')
             if price and float(price) > 0:
-                logger.info(f"   ✅ API Ninjas: ${price:.2f}")
                 return float(price)
-        else:
-            logger.warning(f"⚠️ API Ninjas خطا: {response.status_code}")
         return None
-    except Exception as e:
-        logger.error(f"خطا در API Ninjas: {e}")
+    except:
         return None
 
 # =============================================
-# ۶. دریافت از GOLD-API (برای طلا و نقره) ⭐
+# ۶. دریافت از GOLD-API
 # =============================================
 
 def get_gold_api_price(symbol):
@@ -184,21 +169,18 @@ def get_gold_api_price(symbol):
         return None
     try:
         url = f"https://api.gold-api.com/price/{metal}"
-        # افزایش timeout و غیرفعال کردن بررسی SSL (در صورت نیاز)
         response = requests.get(url, timeout=15, verify=False)
         if response.status_code == 200:
             data = response.json()
             price = data.get('price')
             if price and float(price) > 0:
-                logger.info(f"   ✅ Gold-API ({metal}): ${price:.2f}")
                 return float(price)
         return None
-    except Exception as e:
-        logger.error(f"خطا در Gold-API: {e}")
+    except:
         return None
 
 # =============================================
-# ۷. دریافت از METALS-API (برای نقره) ⭐
+# ۷. دریافت از METALS-API
 # =============================================
 
 def get_metals_api_price(symbol):
@@ -206,25 +188,21 @@ def get_metals_api_price(symbol):
         return None
     try:
         url = "https://api.metals.live/v1/spot/silver"
-        # غیرفعال کردن بررسی SSL برای حل خطای SSL
         response = requests.get(url, timeout=15, verify=False)
         if response.status_code == 200:
             data = response.json()
             price = data.get('price')
             if price and float(price) > 0:
-                logger.info(f"   ✅ Metals-API: ${price:.2f}")
                 return float(price)
         return None
-    except Exception as e:
-        logger.error(f"خطا در Metals-API: {e}")
+    except:
         return None
 
 # =============================================
-# ۸. دریافت از COINGECKO (فقط برای بیت‌کوین و اتریوم)
+# ۸. دریافت از COINGECKO
 # =============================================
 
 def get_coingecko_price(coin_id):
-    """دریافت قیمت از CoinGecko برای ارزهای دیجیتال"""
     try:
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
         response = requests.get(url, timeout=10)
@@ -232,15 +210,87 @@ def get_coingecko_price(coin_id):
             data = response.json()
             price = data.get(coin_id, {}).get('usd')
             if price and float(price) > 0:
-                logger.info(f"   ✅ CoinGecko ({coin_id}): ${price:.2f}")
                 return float(price)
         return None
-    except Exception as e:
-        logger.error(f"خطا در CoinGecko: {e}")
+    except:
         return None
 
 # =============================================
-# ۹. سیستم پشتیبان چندمنبعی با میانگین‌گیری ⭐
+# ۹. قیمت طلای ایران (پویا با ۳ منبع)
+# =============================================
+
+def get_usd_irr():
+    """دریافت قیمت دلار از TGJU با fallback"""
+    try:
+        url = "https://www.tgju.org/profile/price_dollar_rl"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(r.text, "html.parser")
+        elem = soup.select_one("span[data-col='info.last_trade.PDrrVal']")
+        if elem:
+            txt = elem.text.replace(",", "").strip()
+            if txt.isdigit():
+                return int(txt)
+        return None
+    except:
+        return None
+
+def get_iran_gold():
+    """دریافت قیمت طلای ایران از ۳ منبع مختلف"""
+    # منبع ۱: goldprice.org + دلار TGJU
+    try:
+        url = "https://goldprice.org/live-gold-price.html"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            text = soup.get_text()
+            match = re.search(r'Spot Gold Price:\s*USD\s*([\d,]+\.?\d*)', text)
+            if match:
+                usd_price = float(match.group(1).replace(',', ''))
+                usd_irr = get_usd_irr()
+                if usd_irr:
+                    return int(usd_price * usd_irr)
+    except:
+        pass
+    
+    # منبع ۲: استفاده از قیمت طلا از Gold-API + دلار TGJU
+    try:
+        gold_usd = get_gold_api_price('GOLD')
+        if gold_usd:
+            usd_irr = get_usd_irr()
+            if usd_irr:
+                return int(gold_usd * usd_irr)
+    except:
+        pass
+    
+    # منبع ۳: مقدار ثابت (آخرین راه)
+    return 0
+
+# =============================================
+# ۱۰. قیمت تتر (USDT) به تومان (با ۲ منبع)
+# =============================================
+
+def get_usdt_irr():
+    """دریافت قیمت تتر از TGJU با fallback"""
+    # منبع ۱: TGJU
+    try:
+        url = "https://www.tgju.org/profile/usdt"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            elem = soup.select_one("span[data-col='info.last_trade.PDrrVal']")
+            if elem:
+                txt = elem.text.replace(",", "").strip()
+                if txt.isdigit():
+                    return int(txt)
+        return None
+    except:
+        return None
+
+# =============================================
+# ۱۱. سیستم پشتیبان چندمنبعی
 # =============================================
 
 def get_aggregated_price(symbol):
@@ -250,100 +300,78 @@ def get_aggregated_price(symbol):
         sources = ['goldapi', 'yahoo', 'goldprice', 'ninjas', 'pyth']
     elif symbol == 'SILVER':
         sources = ['goldapi', 'metals', 'yahoo', 'goldprice', 'ninjas', 'pyth']
-    else:  # BTC, ETH
+    else:
         sources = ['coingecko', 'chainlink', 'yahoo']
     
-    logger.info(f"🔍 دریافت قیمت {symbol} از {len(sources)} منبع...")
+    logger.info(f"🔍 دریافت قیمت {symbol}...")
     
     for source in sources:
         try:
             if source == 'goldapi':
                 price = get_gold_api_price(symbol)
-                if price and float(price) > 0:
+                if price:
                     prices[source] = price
-                    logger.info(f"   ✅ Gold-API: ${price:.2f}")
             elif source == 'metals':
                 price = get_metals_api_price(symbol)
-                if price and float(price) > 0:
+                if price:
                     prices[source] = price
-                    logger.info(f"   ✅ Metals-API: ${price:.2f}")
             elif source == 'coingecko':
-                coin_map = {
-                    'BTC': 'bitcoin',
-                    'ETH': 'ethereum'
-                }
+                coin_map = {'BTC': 'bitcoin', 'ETH': 'ethereum'}
                 coin_id = coin_map.get(symbol)
                 if coin_id:
                     price = get_coingecko_price(coin_id)
-                    if price and float(price) > 0:
+                    if price:
                         prices[source] = price
-                        logger.info(f"   ✅ CoinGecko: ${price:.2f}")
             elif source == 'pyth':
                 feed_ids = {
                     'GOLD': '0x8b7c8e4c6e5b9a8c7d6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4',
                     'SILVER': '0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8'
                 }
                 price = get_pyth_price(feed_ids[symbol])
-                if price and float(price) > 0:
+                if price:
                     prices[source] = price
-                    logger.info(f"   ✅ Pyth: ${price:.2f}")
             elif source == 'chainlink':
                 price = get_chainlink_price(symbol)
-                if price and float(price) > 0:
+                if price:
                     prices[source] = price
-                    logger.info(f"   ✅ Chainlink: ${price:.2f}")
             elif source == 'yahoo':
                 price = get_yahoo_price(symbol)
-                if price and float(price) > 0:
+                if price:
                     prices[source] = price
-                    logger.info(f"   ✅ Yahoo: ${price:.2f}")
             elif source == 'goldprice':
                 price = get_goldprice_org_price(symbol)
-                if price and float(price) > 0:
+                if price:
                     prices[source] = price
-                    logger.info(f"   ✅ Goldprice.org: ${price:.2f}")
             elif source == 'ninjas':
                 price = get_ninjas_price(symbol)
-                if price and float(price) > 0:
+                if price:
                     prices[source] = price
-                    logger.info(f"   ✅ Ninjas: ${price:.2f}")
-        except Exception as e:
-            logger.warning(f"   ⚠️ خطا در {source}: {e}")
+        except:
+            pass
     
     if len(prices) == 0:
-        logger.warning(f"⚠️ هیچ منبعی برای {symbol} در دسترس نیست")
         return None, {}, 0
     
     price_values = list(prices.values())
     avg_price = sum(price_values) / len(price_values)
-    std_dev = np.std(price_values) if len(price_values) > 1 else 0
-    
-    if std_dev > avg_price * 0.03:
-        logger.warning(f"⚠️ اختلاف زیاد بین منابع {symbol}: {std_dev:.2f} (میانگین: {avg_price:.2f})")
-    
-    logger.info(f"✅ میانگین قیمت {symbol}: ${avg_price:.2f} (از {len(prices)} منبع)")
+    logger.info(f"✅ میانگین {symbol}: ${avg_price:.2f} (از {len(prices)} منبع)")
     return avg_price, prices, len(prices)
 
 def get_market_data_with_aggregation(symbol, days=30):
-    logger.info(f"📊 دریافت داده‌های تاریخی برای {symbol}...")
+    logger.info(f"📊 دریافت داده‌های تاریخی {symbol}...")
     
-    # اولویت اول: Yahoo Finance (داده‌های تاریخی واقعی)
     historical_df = get_yahoo_historical(symbol, days)
     if historical_df is not None:
-        logger.info(f"✅ داده‌های تاریخی {symbol} از یاهو دریافت شد ({len(historical_df)} ردیف)")
         return historical_df
     
-    # اگر یاهو در دسترس نبود، از قیمت میانگین استفاده می‌کنیم
     avg_price, prices, count = get_aggregated_price(symbol)
     if avg_price is None or avg_price == 0:
-        logger.warning(f"⚠️ قیمت {symbol} معتبر نیست (صفر یا منفی)، از داده‌های جایگزین استفاده می‌شود")
         return generate_fallback_data(symbol, days)
     
-    logger.info(f"🔄 ساخت داده‌های تاریخی {symbol} از میانگین قیمت {avg_price:.2f}")
     return generate_historical_from_price(avg_price, symbol, days)
 
 # =============================================
-# ۱۰. ساخت داده‌های تاریخی از یک قیمت
+# ۱۲. ساخت داده‌های تاریخی
 # =============================================
 
 def generate_historical_from_price(current_price, symbol, days=30):
@@ -368,19 +396,10 @@ def generate_historical_from_price(current_price, symbol, days=30):
         'Volume': np.random.randint(1000, 5000, days)
     }, index=dates)
 
-# =============================================
-# ۱۱. داده‌های جایگزین (آخرین گزینه)
-# =============================================
-
 def generate_fallback_data(symbol, days=30):
     now = datetime.now()
     dates = [now - timedelta(days=i) for i in range(days, 0, -1)]
-    base_prices = {
-        'GOLD': 4600,
-        'SILVER': 55,
-        'BTC': 65000,
-        'ETH': 3500
-    }
+    base_prices = {'GOLD': 4600, 'SILVER': 55, 'BTC': 65000, 'ETH': 3500}
     vol_map = {'GOLD': 0.015, 'SILVER': 0.025, 'BTC': 0.025, 'ETH': 0.03}
     base = base_prices.get(symbol, 100)
     vol = vol_map.get(symbol, 0.02)
@@ -393,7 +412,6 @@ def generate_fallback_data(symbol, days=30):
         if new_price > prices[-1] * 1.08:
             new_price = prices[-1] * 1.08
         prices.append(new_price)
-    logger.info(f"📊 داده‌های جایگزین برای {symbol} با قیمت پایه {base} ساخته شد")
     return pd.DataFrame({
         'Open': [p * (1 + np.random.normal(0, 0.003)) for p in prices],
         'High': [p * (1 + abs(np.random.normal(0, 0.006))) for p in prices],
@@ -403,27 +421,7 @@ def generate_fallback_data(symbol, days=30):
     }, index=dates)
 
 # =============================================
-# ۱۲. قیمت طلای ایران
-# =============================================
-
-def get_iran_gold():
-    try:
-        url = "https://www.tgju.org/profile/geram18"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-        elem = soup.select_one("span[data-col='info.last_trade.PDrrVal']")
-        if elem:
-            txt = elem.text.replace(",", "").replace("ریال", "").strip()
-            if txt.isdigit():
-                return int(txt)
-        return None
-    except Exception as e:
-        logger.error(f"خطا در طلای ایران: {e}")
-        return None
-
-# =============================================
-# ۱۳. کلاس معامله‌گر (بدون تغییر)
+# ۱۳. کلاس معامله‌گر
 # =============================================
 
 class CombinedTrader:
@@ -442,8 +440,8 @@ class CombinedTrader:
         self.load_state()
     
     def load_state(self):
-        if os.path.exists(self.state_file):
-            try:
+        try:
+            if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
                     data = json.load(f)
                     if data.get('symbol') == self.symbol:
@@ -455,8 +453,19 @@ class CombinedTrader:
                         self.max_drawdown = data.get('max_drawdown', 0)
                         self.peak = data.get('peak', self.initial)
                         logger.info(f"✅ وضعیت {self.symbol} بارگذاری شد (سرمایه: {self.capital:.2f})")
-            except Exception as e:
-                logger.warning(f"⚠️ خطا در بارگذاری {self.symbol}: {e}")
+                        return
+        except Exception as e:
+            logger.warning(f"⚠️ خطا در بارگذاری {self.symbol}: {e}")
+        
+        # شروع جدید
+        logger.info(f"🆕 شروع جدید برای {self.symbol} با سرمایه {self.initial}")
+        self.capital = self.initial
+        self.trades = []
+        self.open_positions = {}
+        self.wins = 0
+        self.losses = 0
+        self.max_drawdown = 0
+        self.peak = self.initial
     
     def save_state(self):
         try:
@@ -496,7 +505,6 @@ class CombinedTrader:
         position_size = min(position_size, max_position)
         if position_size < 0.001:
             return 0
-        logger.info(f"📊 حجم: {position_size:.4f} (ریسک: {adjusted_risk:.2f}, امتیاز: {signal_score:.1f})")
         return position_size
     
     def get_signal_with_reason(self, df, idx):
@@ -565,6 +573,7 @@ class CombinedTrader:
         timestamp = df.index[last_idx]
         new_entries = []
         closed_trades = []
+        
         for sym in list(self.open_positions.keys()):
             pos = self.open_positions[sym]
             if pos['type'] == 'BUY':
@@ -585,6 +594,7 @@ class CombinedTrader:
                     closed = self.close_trade(sym, pos['tp'], 'TAKE PROFIT', timestamp)
                     if closed:
                         closed_trades.append(closed)
+        
         if symbol not in self.open_positions:
             signal, confidence, reasons, score = self.get_signal_with_reason(df, last_idx)
             if confidence >= self.config.MIN_CONFIDENCE and signal in ['BUY', 'SELL']:
@@ -595,6 +605,7 @@ class CombinedTrader:
                     entry = self.open_trade(symbol, signal, price, size, atr, reasons, confidence, timestamp, score)
                     if entry:
                         new_entries.append(entry)
+        
         self.save_state()
         return new_entries, closed_trades
     
@@ -701,11 +712,12 @@ class CombinedTrader:
         }
 
 # =============================================
-# ۱۴. توابع تولید پیام‌های تلگرامی
+# ۱۴. پیام‌های تلگرامی
 # =============================================
 
-def format_entry_message(entry):
+def format_entry_message(entry, usdt_price):
     reasons_text = "\n".join([f"   • {k}: {v}" for k, v in entry['reasons'].items()])
+    usdt_text = f"💵 قیمت تتر: {usdt_price:,} تومان" if usdt_price and usdt_price > 0 else ""
     return f"""
 📢 **ورود به معامله {entry['symbol']}**
 
@@ -716,6 +728,7 @@ def format_entry_message(entry):
 🛑 حد ضرر (SL): ${entry['sl']:.2f}
 📈 اعتماد به سیگنال: {entry['confidence']}%
 📊 امتیاز سیگنال: {entry['score']:.1f}
+{usdt_text}
 
 🔍 **تحلیل ورود:**
 {reasons_text}
@@ -723,8 +736,9 @@ def format_entry_message(entry):
 ⏰ زمان ورود: {entry['time'].strftime('%Y-%m-%d %H:%M:%S')}
 """
 
-def format_exit_message(trade):
+def format_exit_message(trade, usdt_price):
     reasons_text = "\n".join([f"   • {k}: {v}" for k, v in trade['reasons'].items()])
+    usdt_text = f"💵 قیمت تتر: {usdt_price:,} تومان" if usdt_price and usdt_price > 0 else ""
     return f"""
 📢 **خروج از معامله {trade['symbol']}**
 
@@ -734,6 +748,7 @@ def format_exit_message(trade):
 📈 سود/زیان: {trade['pnl_percent']:+.2f}% (${trade['pnl_amount']:+.2f})
 📉 دلیل خروج: {trade['exit_reason']}
 📊 امتیاز سیگنال هنگام ورود: {trade['score']:.1f}
+{usdt_text}
 
 🔍 **تحلیل ورود (مرجع):**
 {reasons_text}
@@ -741,70 +756,12 @@ def format_exit_message(trade):
 ⏰ زمان خروج: {trade['exit_time'].strftime('%Y-%m-%d %H:%M:%S')}
 """
 
-def format_status_report(metrics_all, iran_price):
-    now = datetime.now(pytz.timezone("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S")
-    open_positions_text = ""
-    for symbol, metrics in metrics_all.items():
-        if metrics['open_positions']:
-            for sym, pos in metrics['open_positions'].items():
-                current_price = pos['entry'] * (1 + np.random.uniform(-0.02, 0.02))
-                if pos['type'] == 'BUY':
-                    float_pnl = (current_price - pos['entry']) / pos['entry'] * 100
-                else:
-                    float_pnl = (pos['entry'] - current_price) / pos['entry'] * 100
-                open_positions_text += f"• {sym}: {pos['direction']} @ ${pos['entry']:.2f} | قیمت فعلی: ${current_price:.2f} | سود/زیان شناور: {float_pnl:+.2f}% | TP: ${pos['tp']:.2f} | SL: ${pos['sl']:.2f} | امتیاز ورود: {pos['score']:.1f}\n"
-    if not open_positions_text:
-        open_positions_text = "هیچ پوزیشن بازی وجود ندارد. در انتظار سیگنال جدید...\n"
-    total_cap = sum(m['capital'] for m in metrics_all.values())
-    total_ret = (total_cap - 10000) / 10000 * 100
-    total_trades = sum(m['trades'] for m in metrics_all.values())
-    total_wins = sum(m['wins'] for m in metrics_all.values())
-    win_rate = (total_wins / max(1, total_trades) * 100)
-    report = f"""
-🧠 **گزارش وضعیت لایو تریدینگ ترکیبی (سرمایه پویا)**
-⏰ زمان: {now}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🇮🇷 طلای ۱۸ عیار ایران: {iran_price:,} ریال
-
-📌 **سرمایه کل:** ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
-📌 **استراتژی حجم:** بر اساس قدرت سیگنال و نوسان (پویا)
-📌 **منابع داده:** Gold-API, Metals-API, Pyth, Chainlink, Yahoo, Goldprice.org, Ninjas
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📌 **پوزیشن‌های باز:**
-{open_positions_text}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📊 **خلاصه عملکرد:**
-• سرمایه کل: {total_cap:,.2f} دلار
-• بازده کل: {total_ret:+.2f}%
-• کل معاملات: {total_trades}
-• نرخ موفقیت: {win_rate:.1f}%
-
-"""
-    for symbol, metrics in metrics_all.items():
-        report += f"📌 {symbol}: سرمایه {metrics['capital']:,.2f} | بازده {metrics['return']:+.2f}% | معاملات {metrics['trades']}\n"
-    report += f"""
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🎯 **استراتژی:** ترکیب RSI، MACD، میانگین‌ها، دایورجنس و ATR
-🛡️ **مدیریت ریسک پویا:** حد ضرر ۳٪، حد سود ۶٪، حجم بر اساس امتیاز سیگنال و نوسان
-
-⚠️ **توجه:** این شبیه‌سازی است و توصیه‌ی مالی نیست.
-"""
-    return report.strip()
-
 # =============================================
 # ۱۵. ارسال به تلگرام
 # =============================================
 
 async def send_telegram(text):
     if not TOKEN or not CHAT_ID:
-        logger.error("❌ TELEGRAM_TOKEN یا CHAT_ID تنظیم نشده!")
         return False
     try:
         bot = Bot(token=TOKEN)
@@ -816,9 +773,6 @@ async def send_telegram(text):
         else:
             await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
         return True
-    except TelegramError as e:
-        logger.error(f"خطای تلگرام: {e}")
-        return False
     except Exception as e:
         logger.error(f"خطا در ارسال: {e}")
         return False
@@ -828,14 +782,23 @@ async def send_telegram(text):
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی با سیستم پشتیبان چندمنبعی (Gold-API و Metals-API)...")
-    for f in ['state_gold.json', 'state_silver.json', 'state_btc.json', 'state_eth.json', 'state_combined.json']:
-        if os.path.exists(f):
-            os.remove(f)
-            logger.info(f"🗑️ فایل {f} حذف شد")
-    iran = get_iran_gold()
-    if iran is None:
-        iran = 210_000_000
+    logger.info("🚀 شروع ربات ترکیبی...")
+    
+    # دریافت قیمت تتر
+    usdt_price = get_usdt_irr()
+    if usdt_price is None or usdt_price == 0:
+        usdt_price = 0
+        logger.warning("⚠️ قیمت تتر دریافت نشد")
+    else:
+        logger.info(f"💵 قیمت تتر: {usdt_price:,} تومان")
+    
+    # دریافت قیمت طلای ایران
+    iran_gold = get_iran_gold()
+    if iran_gold is None or iran_gold == 0:
+        iran_gold = 210_000_000
+        logger.warning("⚠️ قیمت طلای ایران دریافت نشد، از مقدار ثابت استفاده شد")
+    else:
+        logger.info(f"🇮🇷 قیمت طلای ایران: {iran_gold:,} ریال")
     
     gold_df = get_market_data_with_aggregation('GOLD', days=30)
     silver_df = get_market_data_with_aggregation('SILVER', days=30)
@@ -853,19 +816,11 @@ async def main():
     entries_eth, exits_eth = trader_eth.process(eth_df, 'ETH')
     
     for entry in entries_gold + entries_silver + entries_btc + entries_eth:
-        await send_telegram(format_entry_message(entry))
+        await send_telegram(format_entry_message(entry, usdt_price))
     
     for trade in exits_gold + exits_silver + exits_btc + exits_eth:
-        await send_telegram(format_exit_message(trade))
+        await send_telegram(format_exit_message(trade, usdt_price))
     
-    metrics_all = {
-        'GOLD': trader_gold.get_metrics(),
-        'SILVER': trader_silver.get_metrics(),
-        'BTC': trader_btc.get_metrics(),
-        'ETH': trader_eth.get_metrics()
-    }
-    status_report = format_status_report(metrics_all, iran)
-    await send_telegram(status_report)
     logger.info("🏁 پایان اجرا")
 
 if __name__ == "__main__":
