@@ -2,8 +2,7 @@
 ربات ترکیبی لایو ترید (طلا، نقره، بیت‌کوین، اتریوم)
 سرمایه کل: ۱۰,۰۰۰ دلار (هر بازار ۲,۵۰۰ دلار)
 فقط پیام‌های ورود و خروج
-قیمت تتر از صرافی‌های ایرانی (نوبیتکس، بیت‌پین، والکس)
-قیمت طلای ایران از منابع رایگان (Navasan، ir-gold-api، TGJU API)
+قیمت تتر و طلا از منابع بین‌المللی (بدون ثبت‌نام)
 """
 
 import os
@@ -189,203 +188,99 @@ def get_coingecko_price(coin_id):
         return None
 
 # =============================================
-# دریافت قیمت تتر از صرافی‌های ایرانی (رایگان)
+# دریافت نرخ دلار به ریال (از منبع بین‌المللی)
 # =============================================
 
-def get_usdt_from_nobitex():
-    """دریافت قیمت تتر از نوبیتکس"""
+def get_usd_irr_exchangerate():
+    """دریافت نرخ دلار به ریال از exchangerate.host (رایگان، بدون ثبت‌نام)"""
     try:
-        url = "https://api.nobitex.ir/v2/orderbook/USDTIRT"
-        response = requests.get(url, timeout=8)
+        url = "https://api.exchangerate.host/convert?from=USD&to=IRR"
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            bids = data.get('bids', [])
-            asks = data.get('asks', [])
-            if bids and asks:
-                bid_price = float(bids[0][0])
-                ask_price = float(asks[0][0])
-                return int((bid_price + ask_price) / 2)
+            rate = data.get('result')
+            if rate:
+                return int(rate)
         return None
     except Exception as e:
-        logger.error(f"خطا در نوبیتکس: {e}")
+        logger.error(f"خطا در exchangerate.host: {e}")
         return None
 
-def get_usdt_from_bitpin():
-    """دریافت قیمت تتر از بیت‌پین"""
+def get_usd_irr_tgju():
+    """دریافت نرخ دلار از TGJU (با اسکرپ) به عنوان پشتیبان"""
     try:
-        url = "https://api.bitpin.ir/api/v1/markets/"
-        response = requests.get(url, timeout=8)
+        url = "https://www.tgju.org/profile/price_dollar_rl"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
-            data = response.json()
-            for market in data.get('results', []):
-                if market.get('symbol') == 'USDT-IRR':
-                    return int(float(market.get('price', 0)))
+            soup = BeautifulSoup(response.text, "html.parser")
+            elem = soup.select_one("span[data-col='info.last_trade.PDrrVal']")
+            if elem:
+                txt = elem.text.replace(",", "").strip()
+                if txt.isdigit():
+                    return int(txt)
         return None
-    except Exception as e:
-        logger.error(f"خطا در بیت‌پین: {e}")
+    except:
         return None
 
-def get_usdt_from_wallex():
-    """دریافت قیمت تتر از والکس"""
-    try:
-        url = "https://api.wallex.ir/v1/markets"
-        response = requests.get(url, timeout=8)
-        if response.status_code == 200:
-            data = response.json()
-            for market in data.get('result', {}).get('symbols', []):
-                if market.get('symbol') == 'USDTIRT':
-                    return int(float(market.get('price', 0)))
-        return None
-    except Exception as e:
-        logger.error(f"خطا در والکس: {e}")
-        return None
-
-def get_usdt_from_tetherland():
-    """دریافت قیمت تتر از تترلند"""
-    try:
-        url = "https://api.tetherland.com/api/v1/price"
-        response = requests.get(url, timeout=8)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price', {}).get('IRT')
-            if price:
-                return int(float(price))
-        return None
-    except Exception as e:
-        logger.error(f"خطا در تترلند: {e}")
-        return None
-
-def get_usdt_from_arzbin():
-    """دریافت قیمت تتر از آرزبین"""
-    try:
-        url = "https://api.arzbin.com/latest/USDT"
-        response = requests.get(url, timeout=8)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price')
-            if price:
-                return int(float(price))
-        return None
-    except Exception as e:
-        logger.error(f"خطا در آرزبین: {e}")
-        return None
-
-def get_usdt_irr_with_fallback():
-    """دریافت قیمت تتر از چندین منبع با fallback (همگی رایگان)"""
-    sources = [
-        ('نوبیتکس', get_usdt_from_nobitex),
-        ('بیت‌پین', get_usdt_from_bitpin),
-        ('والکس', get_usdt_from_wallex),
-        ('تترلند', get_usdt_from_tetherland),
-        ('آرزبین', get_usdt_from_arzbin),
-    ]
-    
-    for name, func in sources:
-        try:
-            price = func()
-            if price and price > 0:
-                logger.info(f"💵 قیمت تتر از {name}: {price:,} تومان")
-                return price
-        except Exception as e:
-            logger.warning(f"⚠️ خطا در دریافت از {name}: {e}")
-            continue
-    
-    logger.warning("⚠️ همه منابع قیمت تتر قطع هستند")
+def get_usd_irr_with_fallback():
+    """دریافت نرخ دلار با اولویت exchangerate.host و سپس TGJU"""
+    rate = get_usd_irr_exchangerate()
+    if rate:
+        logger.info(f"💵 نرخ دلار از exchangerate.host: {rate:,} ریال")
+        return rate
+    rate = get_usd_irr_tgju()
+    if rate:
+        logger.info(f"💵 نرخ دلار از TGJU: {rate:,} ریال")
+        return rate
+    logger.warning("⚠️ نرخ دلار دریافت نشد")
     return None
 
 # =============================================
-# دریافت قیمت طلای ایران از منابع رایگان
+# دریافت قیمت تتر به ریال
 # =============================================
 
-def get_gold_from_navasan():
-    """دریافت قیمت طلای ۱۸ عیار از Navasan API"""
+def get_usdt_irr():
+    """دریافت قیمت تتر: قیمت USDT از CoinGecko به دلار * نرخ دلار به ریال"""
     try:
-        url = "https://raw.githubusercontent.com/HosseinOdd/Navasan-API/main/data/gold.json"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict) and 'طلای ۱۸' in item.get('title', ''):
-                        price_str = item.get('price', '').replace(',', '')
-                        if price_str.isdigit():
-                            return int(price_str)
-        return None
+        # قیمت تتر به دلار از CoinGecko
+        usdt_usd = get_coingecko_price('tether')
+        if not usdt_usd:
+            logger.warning("⚠️ قیمت تتر به دلار دریافت نشد")
+            return None
+        # نرخ دلار به ریال
+        usd_irr = get_usd_irr_with_fallback()
+        if not usd_irr:
+            return None
+        price = int(usdt_usd * usd_irr)
+        logger.info(f"💵 قیمت تتر: {price:,} تومان (USDT: ${usdt_usd:.4f} * نرخ دلار: {usd_irr:,})")
+        return price
     except Exception as e:
-        logger.error(f"خطا در Navasan: {e}")
+        logger.error(f"خطا در محاسبه قیمت تتر: {e}")
         return None
 
-def get_gold_from_irgold_api():
-    """دریافت قیمت طلا از ir-gold-api"""
-    try:
-        url = "https://ir-gold-api.onrender.com/gold18"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price')
-            if price:
-                return int(price)
-        return None
-    except Exception as e:
-        logger.error(f"خطا در ir-gold-api: {e}")
-        return None
+# =============================================
+# دریافت قیمت طلای ایران به ریال
+# =============================================
 
-def get_gold_from_tgju_api():
-    """دریافت قیمت طلا از TGJU API"""
-    try:
-        url = "https://tgju.amirhossein.info/api/gold"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data and isinstance(data, list) and len(data) > 0:
-                prices = data[0].get('prices', [])
-                for item in prices:
-                    if item.get('key') == 'geram18':
-                        price_str = item.get('price', '').replace(',', '')
-                        if price_str.isdigit():
-                            return int(price_str)
-        return None
-    except Exception as e:
-        logger.error(f"خطا در TGJU API: {e}")
-        return None
-
-def get_gold_from_goldprice_org_ir():
-    """دریافت قیمت طلا از goldprice.org (قیمت جهانی به دلار) و تبدیل با نرخ تتر"""
+def get_iran_gold():
+    """دریافت قیمت طلای ایران: قیمت جهانی طلا به دلار * نرخ دلار به ریال"""
     try:
         # قیمت جهانی طلا به دلار
-        gold_usd = get_goldprice_org_price('GOLD')
+        gold_usd = get_gold_api_price('GOLD') or get_goldprice_org_price('GOLD')
         if not gold_usd:
+            logger.warning("⚠️ قیمت جهانی طلا دریافت نشد")
             return None
-        # قیمت تتر به ریال
-        usdt_irr = get_usdt_irr_with_fallback()
-        if not usdt_irr:
+        # نرخ دلار به ریال
+        usd_irr = get_usd_irr_with_fallback()
+        if not usd_irr:
             return None
-        return int(gold_usd * usdt_irr)
+        price = int(gold_usd * usd_irr)
+        logger.info(f"🇮🇷 قیمت طلای ایران: {price:,} ریال (طلا: ${gold_usd:.2f} * نرخ دلار: {usd_irr:,})")
+        return price
     except Exception as e:
-        logger.error(f"خطا در goldprice.org: {e}")
+        logger.error(f"خطا در محاسبه قیمت طلای ایران: {e}")
         return None
-
-def get_iran_gold_with_fallback():
-    """دریافت قیمت طلای ایران از چندین منبع با fallback (همگی رایگان)"""
-    sources = [
-        ('Navasan', get_gold_from_navasan),
-        ('ir-gold-api', get_gold_from_irgold_api),
-        ('TGJU API', get_gold_from_tgju_api),
-        ('goldprice.org + تتر', get_gold_from_goldprice_org_ir),
-    ]
-    
-    for name, func in sources:
-        try:
-            price = func()
-            if price and price > 0:
-                logger.info(f"🇮🇷 قیمت طلای ایران از {name}: {price:,} ریال")
-                return price
-        except Exception as e:
-            logger.warning(f"⚠️ خطا در دریافت از {name}: {e}")
-            continue
-    
-    logger.warning("⚠️ همه منابع قیمت طلا قطع هستند")
-    return None
 
 # =============================================
 # سیستم پشتیبان چندمنبعی برای قیمت‌های جهانی
@@ -875,18 +770,18 @@ async def send_telegram(text):
 # =============================================
 
 async def main():
-    logger.info("🚀 شروع ربات ترکیبی (با پشتیبان‌های متعدد رایگان)...")
+    logger.info("🚀 شروع ربات ترکیبی (با منابع بین‌المللی)...")
     
-    # دریافت قیمت تتر با fallback
-    usdt_price = get_usdt_irr_with_fallback()
+    # دریافت قیمت تتر
+    usdt_price = get_usdt_irr()
     if usdt_price is None or usdt_price == 0:
         usdt_price = 0
         logger.warning("⚠️ قیمت تتر دریافت نشد")
     else:
         logger.info(f"💵 قیمت تتر نهایی: {usdt_price:,} تومان")
     
-    # دریافت قیمت طلای ایران با fallback
-    iran_gold = get_iran_gold_with_fallback()
+    # دریافت قیمت طلای ایران
+    iran_gold = get_iran_gold()
     if iran_gold is None or iran_gold == 0:
         iran_gold = 210_000_000
         logger.warning("⚠️ قیمت طلای ایران دریافت نشد، از مقدار ثابت استفاده شد")
